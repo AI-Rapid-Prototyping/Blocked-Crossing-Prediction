@@ -134,9 +134,8 @@ def summarize_state_density(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def preprocess_blocked_crossings(blocked_xlsx: Path, blocked_csv: Path) -> pd.DataFrame:
-    blocked = clean_columns(pd.read_excel(blocked_xlsx))
+    blocked = clean_columns(pd.read_excel(blocked_xlsx)) # if this were a csv read, would use parse_dates argument
     blocked.to_csv(blocked_csv, index=False)
-    blocked = clean_columns(read_csv(blocked_csv, parse_dates=["Date/Time"]))
     if "Date/Time" not in blocked.columns:
         raise KeyError("Missing expected blocked crossing date/time column: Date/Time")
     if not pd.api.types.is_datetime64_any_dtype(blocked["Date/Time"]):

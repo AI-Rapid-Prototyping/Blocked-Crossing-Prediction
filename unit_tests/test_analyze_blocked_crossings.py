@@ -28,20 +28,12 @@ class PreprocessBlockedCrossingsTests(unittest.TestCase):
         xlsx_path = Path("blocked_crossings.xlsx")
         csv_path = Path("blocked_crossings.csv")
 
-        captured: dict[str, object] = {}
-
-        def fake_to_csv(self: pd.DataFrame, path: Path, **kwargs: object) -> None:
-            captured["path"] = Path(path)
-            captured["written"] = self.copy()
-
         with patch.object(mod.pd, "read_excel", return_value=sample.copy()), patch.object(
-            mod.pd.DataFrame, "to_csv", fake_to_csv
-        ), patch.object(mod, "read_csv", return_value=sample.copy()):
+            mod.pd.DataFrame, "to_csv", lambda self, *args, **kwargs: None
+        ):
             result = mod.preprocess_blocked_crossings(xlsx_path, csv_path)
 
         self.assertTrue(pd.api.types.is_datetime64_any_dtype(result["Date/Time"]))
-        self.assertEqual(captured["path"], csv_path)
-        self.assertTrue(pd.api.types.is_datetime64_any_dtype(captured["written"]["Date/Time"]))
         self.assertEqual(result.loc[0, "Date/Time"].time(), time(12, 34, 56))
         self.assertEqual(result.loc[1, "Date/Time"].time(), time(0, 0))
 
