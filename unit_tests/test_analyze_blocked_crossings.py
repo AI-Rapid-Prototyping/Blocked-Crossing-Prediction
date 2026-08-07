@@ -1,3 +1,9 @@
+"""
+FILE: test_analyze_blocked_crossings.py
+PURPOSE: Tests our main analysis script using fake sample data so we don't 
+         have to mess with real files. Makes sure dates and text clean up properly.
+"""
+
 from __future__ import annotations
 
 import sys

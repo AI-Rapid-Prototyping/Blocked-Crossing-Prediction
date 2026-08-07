@@ -1,7 +1,11 @@
+"""
+FILE: evaluate_matrix.py
+PURPOSE: Tests how well the models predict severe delays (31+ mins vs under 31 mins). 
+         creates confusion matrices, and prints the top features driving long blockages.
+"""
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -69,7 +73,7 @@ for i, (name, model) in enumerate(models.items()):
         'F1-Score': f"{f1:.4f}"
     })
     
-    # Plot Confusion Matrix (fixed cbar parameter)
+    # Plot Confusion Matrix
     cm = confusion_matrix(y_test, preds)
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Short Block', 'Severe Block'])
     disp.plot(ax=axes[i], cmap='Blues', colorbar=False)
@@ -109,4 +113,3 @@ importances = rf_model.named_steps['clf'].feature_importances_
 feat_df = pd.DataFrame({'Variable': all_features, 'Importance': importances}).sort_values(by='Importance', ascending=False)
 print("\n=== RANDOM FOREST VARIABLE IMPORTANCE ===")
 print(feat_df.head(10).to_string(index=False))
-
