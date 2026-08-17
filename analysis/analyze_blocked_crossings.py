@@ -1,3 +1,12 @@
+'''
+FILE: analyze_blocked_crossings.py
+PURPOSE: Joins public railroad blockage reports with the official FRA Form 71 
+         crossing inventory. Analyzes national data sparseness vs. local hotspot 
+         density. Compares blocked vs. unblocked crossings, and exports summary 
+         CSVs and charts.
+    
+'''
+
 from __future__ import annotations
 
 import argparse
