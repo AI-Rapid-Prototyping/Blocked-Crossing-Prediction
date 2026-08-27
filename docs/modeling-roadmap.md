@@ -44,7 +44,7 @@ No actual blockage
 
 Until independent validation data become available:
 
-- Reported events are treated as accurate after data-quality review and
+- Reported events are treated as observed reports after data-quality review and
   deduplication.
 - An interval without a report means `no_report_observed`, not `unblocked`.
 - Model probabilities refer to future observed reports under the current
