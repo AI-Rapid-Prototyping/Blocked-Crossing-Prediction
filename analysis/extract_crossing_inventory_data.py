@@ -1,3 +1,9 @@
+"""
+FILE: extract_crossing_inventory_data.py
+PURPOSE: Fetches official crossing metadata directly from the U.S. Department 
+         of Transportation SODA API using a Crossing ID.
+"""
+
 # This page https://datahub.transportation.gov/stories/s/bk9e-kthi links to this other page:
 # https://data.transportation.gov/Railroads/Crossing-Inventory-Data-Form-71-Current/m2f8-22s6/about_data
 # And from there the "Actions" button at upper right gives an API option among others. The resulting pop-up box gives
