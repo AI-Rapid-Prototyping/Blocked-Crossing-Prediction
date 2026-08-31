@@ -6,7 +6,7 @@ See the [blocked-crossing modeling roadmap](docs/modeling-roadmap.md) for the
 project's planned regional screening and pooled hotspot timing workflow.
 
 The active implementation plan is
-[Phase 1: source audit and incident deduplication](docs/plans/01-incident-deduplication.md).
+[Phase 1 remediation: auditable incident deduplication](docs/plans/01a-incident-deduplication-remediation.md).
 
 ## Legacy prototype
 
