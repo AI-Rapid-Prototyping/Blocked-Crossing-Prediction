@@ -6,7 +6,7 @@ import pandas as pd
 repo_root = Path(r"C:/Projects/Blocked-Crossing-Prediction") 
 
 # Paths relative to project root
-reports_path = repo_root / "reports.xlsx"
+reports_path = repo_root / "data" / "reports.xlsx"
 yards_path = repo_root / "data" / "rail_yards.geojson"
 network_path = repo_root / "data" / "rail_network_lines.geojson"
 inventory_path = repo_root / "data" / "Crossing_Inventory_Data_(Form_71)_-_Current_20260707.csv"
