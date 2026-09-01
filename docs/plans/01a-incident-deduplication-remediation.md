@@ -35,14 +35,14 @@ recalculated after remediation.
    `31 to 60 minutes`. The fallback maps every unmapped value to 15 minutes.
 2. **The exact-duplicate rule is not a full-row comparison.** It uses only
    crossing ID, timestamp, and duration. Of 4,821 reports labeled exact
-   duplicates, 1,940 differ in at least one other original field.
+   duplicates, 1,940 differ in at least one other original field. City and State columns
+   should also be used in addition to the three currently used.
+   Other columns can be ignored for the exact-duplicate rule.
 3. **Probable and unresolved candidates are automatically merged.** The existing
    duration-window rule, its 15-minute buffer, and chained window extensions were
    not validated before use. Tier 4 candidates are merged even though their label
    says they require review.
-4. **Timestamp conclusions are overstated.** The field stores seconds, but all
-   26,186 source records dated in 2025 have a seconds value of zero. Storage
-   formatting does not establish second-level observational precision. FRA
+4. **Timestamp conclusions are overstated.** FRA
    documentation supports describing the field as a user-entered reported date
    and time, not necessarily submission time or the physical start time.
 5. **Required validation is incomplete.** The notebook checks three invariants
@@ -53,13 +53,6 @@ recalculated after remediation.
 7. **Boundary and malformed values need explicit handling.** The source contains
    four malformed crossing IDs, two malformed duration strings, and 27 records
    dated January 1, 2026 despite the workbook name ending in 2025.
-
-The current authoritative workbook SHA-256 is
-`a4b06d950f20acf8c4eb03930c43b27d399312277b92bd6412d63038de3cfcc1`.
-The reconciliation workbook SHA-256 is
-`b85be4137b2ae896d3bc599665879660ca2308892a4efd25c080477202d7302e`.
-Implementation must fail with a clear message if either input differs until the
-team reviews and updates the expected fingerprint.
 
 ## Implementation Structure
 
@@ -80,7 +73,7 @@ Refactor `analysis/phase_1_analysis.ipynb` into a thin notebook that:
 4. Derives all narrative counts and gate conclusions from the returned results or
    generated artifacts rather than hard-coding them in Markdown.
 
-The notebook is expected to remain the colleague's primary working interface.
+The notebook is expected to remain the primary working interface.
 Direct function imports are preferred over `%run`, shell `!python` commands, or
 duplicating module code in notebook cells because imports keep notebook, tests,
 and CLI behavior on the same code path.
@@ -117,7 +110,6 @@ The module must not execute the pipeline during import.
 The checked-in JSON configuration must include:
 
 - `ruleset_version`, initially `phase1-v2`.
-- The two expected raw-workbook SHA-256 fingerprints above.
 - The authoritative sheet name.
 - The 11 material columns:
   - `Crossing ID`
@@ -152,25 +144,14 @@ through explicit aliases. Preserve their original values and mark their
 normalization status as `known_alias`. An unrecognized value must retain null
 bounds and status `unmapped`; it must never receive a default duration.
 
-Duration bounds are descriptive metadata. Phase 1 must not use them as known
-physical incident start or end times.
-
 ## Source Inventory and Normalization
 
-1. Verify both expected input fingerprints before processing and verify again
-   after processing to demonstrate raw-file immutability.
-2. Require the configured sheet and all material columns. Fail on missing or
-   duplicate columns rather than guessing a replacement column.
-3. Preserve all original values and original row order.
-4. Create `source_row_id` as `SRC-` plus a stable SHA-256 prefix computed from
-   authoritative file fingerprint, sheet name, and original Excel data-row
-   number. Record the sheet and row number in separate columns as well.
-5. Parse the timestamp into a parallel normalized column without overwriting the
+1. Parse the timestamp into a parallel normalized column without overwriting the
    original value.
-6. Normalize crossing IDs by trimming and uppercasing, then validate the result.
+2. Normalize crossing IDs by trimming and uppercasing, then validate the result.
    Invalid IDs remain in the source table but map to documented exceptions rather
    than canonical incidents.
-7. Normalize comparison text by standardizing nulls, trimming leading/trailing
+3. Normalize comparison text by standardizing nulls, trimming leading/trailing
    whitespace, collapsing repeated whitespace, and case-folding. Preserve raw
    text in every case.
 8. Retain all 27 January 1, 2026 records and flag them as
@@ -180,10 +161,11 @@ physical incident start or end times.
 
 Apply the following precedence to rows with valid crossing IDs and timestamps:
 
-1. **Exact:** all 11 original material values match using null-aware equality.
-2. **Normalized exact:** all 11 normalized comparison values match.
+1. **Exact:** all original material values match using null-aware equality, based on these
+five fields: crossing ID, timestamp, duration, City, and State.
+2. **Normalized exact:** all 5 normalized comparison values match.
 3. **Distinct candidate incident:** every other row remains a separate candidate
-   reported incident during this remediation.
+   reported incident.
 
 Do not auto-merge reports based on temporal proximity, categorical duration,
 reason compatibility, or a chained active window.
@@ -231,19 +213,8 @@ to the ruleset.
 
 ## 2025 Workbook Reconciliation
 
-1. Apply the same schema and comparison normalization to both workbooks.
-2. Restrict the authoritative comparison side to rows whose parsed reported year
-   is 2025.
-3. Compare normalized full-row tuples over all 11 material fields as multisets,
-   preserving duplicate multiplicity.
-4. Report row and unique-signature counts in both sources, rows present only in
-   each source, and differences caused only by multiplicity.
-5. Export full discrepancy rows with source provenance.
-6. Do not append reconciliation-only rows to the authoritative data.
-
-The reconciliation conclusion must describe exactly what the full-row multiset
-comparison proves. It must not call a three-field signature a byte-for-byte row
-match.
+1. Delete the reconciliation of `blocked_crossings_2025.xlsx` with `blocked_crossings_2020through2025.xlsx` 
+and use only `blocked_crossings_2020through2025.xlsx` as the authoritative source.
 
 ## Generated Artifacts
 
@@ -259,16 +230,14 @@ Required outputs are:
 5. `duplicate_candidates.parquet`
 6. `candidate_review_sample.csv`
 7. `inventory_profile.json`
-8. `reconciliation_summary.json`
-9. `reconciliation_discrepancies.parquet`
-10. `deduplication_summary.json`
-11. `diagnostics_by_year.csv`
-12. `diagnostics_by_state.csv`
-13. `diagnostics_by_crossing.csv`
-14. `diagnostics_by_reason.csv`
-15. `timestamp_granularity_by_year.csv`
-16. `phase_1_gate_report.json`
-17. `run_manifest.json`
+8. `deduplication_summary.json`
+9. `diagnostics_by_year.csv`
+10. `diagnostics_by_state.csv`
+11. `diagnostics_by_crossing.csv`
+12. `diagnostics_by_reason.csv`
+13. `timestamp_granularity_by_year.csv`
+14. `phase_1_gate_report.json`
+15. `run_manifest.json`
 
 Every authoritative source row must appear exactly once in the crosswalk, either
 with one canonical incident ID or one exception ID.
@@ -280,7 +249,7 @@ The run manifest must contain:
 - Git commit and dirty-worktree status.
 - Python and relevant package versions.
 - Execution timestamp and duration.
-- Output paths, row counts, and SHA-256 fingerprints.
+- Output paths and row counts.
 - Validation results.
 
 Execution timestamps and durations are allowed to differ between runs. They must
@@ -293,7 +262,6 @@ Report source, incident, duplicate, exception, and candidate counts by:
 - Year.
 - State.
 - Crossing.
-- Reason.
 - Consolidation tier.
 - Duration normalization status.
 - Crossing-volume tier.
@@ -338,7 +306,6 @@ Cover at least:
 - Otherwise identical reports at different crossings.
 - Missing, malformed, and boundary crossing IDs and timestamps.
 - The December 31, 2025 to January 1, 2026 boundary.
-- Full-row reconciliation, including duplicate multiplicity.
 - Unique source-row coverage in the crosswalk.
 - Stable source, incident, exception, and candidate IDs across repeated runs and
   reordered in-memory input.
@@ -387,21 +354,3 @@ Phase 1 remediation is complete only when:
 
 If the review sample has not yet been labeled, implementation may be reported as
 `awaiting_review`, but Phase 1 must not be marked complete.
-
-## Phase 2 Handoff
-
-Do not create the active Phase 2 plan until this remediation passes. The eventual
-`docs/plans/02-reported-event-interval-exposure-geography.md` must:
-
-- Evaluate one-, two-, and four-hour candidate units rather than assuming hourly.
-- Separate point-report labels from duration-overlap sensitivity labels.
-- Carry temporal-candidate and exception uncertainty into diagnostics.
-- Use `report_observed`, `no_report_observed`, and `unknown` claim-safe labels.
-- Define source-coverage periods before generating negative exposure intervals.
-- Define the versioned region and crossing-membership contract and authoritative
-  geographic sources before regional exposure generation.
-- Generate exposure only after requested-region and training-history cohort
-  filtering rather than materializing all national crossing-hours.
-
-Phase 2 implementation begins only after its separate plan is reviewed and made
-active in the roadmap.
