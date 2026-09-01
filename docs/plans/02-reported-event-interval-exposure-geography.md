@@ -43,7 +43,7 @@ Produce reproducible, leakage-safe data contracts and generated tables that:
 5. Generate detailed exposure only after requested-region and past-only cohort
    filtering.
 6. Provide the evidence required to resolve every Phase 2 decision gate in the
-   roadmap.
+   docs/modeling-roadmap.md in this repository.
 
 ## Claim Boundary
 
@@ -72,12 +72,11 @@ Before this plan can be finalized or activated:
 
 1. Every acceptance criterion in the Phase 1 remediation plan must pass.
 2. The deterministic Phase 1 review sample must be labeled and summarized.
-3. Two real-data Phase 1 runs must produce identical deterministic artifacts.
-4. `phase_1_gate_report.json` must contain the evidence required for the
+3. `phase_1_gate_report.json` must contain the evidence required for the
    interval-resolution and uncertainty analyses.
-5. The accepted Phase 1 ruleset, run manifest, artifact fingerprints, and
+4. The accepted Phase 1 ruleset, run manifest, artifact fingerprints, and
    remaining candidate or exception counts must be recorded in this plan.
-6. Every blocking placeholder below must be resolved without guessing.
+5. Every blocking placeholder below must be resolved without guessing.
 
 ### Required Phase 1 inputs
 
@@ -108,16 +107,18 @@ fingerprint, source version, revision-field treatment, and role in geographic
 assignment must be recorded before use. A later reviewed inventory version may
 replace it through configuration; it must not be silently substituted.
 
+Note: once the MPO dataset is known, name it here as a required Phase 2 geographic input with description of owner, path/URL or retrieval process.
+
 ## Blocking Placeholders
 
-These entries record decisions that require Phase 1 results or additional source
+These entries record Phase 2 decisions (per docs/modeling-roadmap.md "## Phase Decision Gates" section) that require Phase 1 results or additional source
 research. They are deliberately unresolved in this preliminary plan.
 
 | ID | Blocking decision | Required evidence | Current status |
 |---|---|---|---|
 | BP-01 | Accepted Phase 1 run and ruleset | Passing gate report, manifest, artifact fingerprints, and labeled review summary | **Unresolved — Phase 1 remediation pending** |
 | BP-02 | Demonstrated source-coverage periods | Source-system evidence and Phase 1 date diagnostics sufficient to distinguish covered from unknown periods | **Unresolved — do not generate `no_report_observed` labels** |
-| BP-03 | Timestamp and time-zone interpretation | Phase 1 timestamp profile, source documentation, geographic time-zone mapping, and daylight-saving-time policy | **Unresolved — do not assume UTC or exact event start** |
+| BP-03 | Timestamp semantics and local-time presentation policy | Phase 1 timestamp profile and source documentation; any required geographic time-zone mapping and daylight-saving-time presentation policy | **Partially resolved — source timestamps are UTC, based on an electronic communication from the FRA data owner dated September 1, 2026; do not assume exact event start** |
 | BP-04 | Selected prediction interval | One-, two-, and four-hour comparison using accepted incidents, coverage, uncertainty, and table-size diagnostics | **Unresolved — hourly is not pre-approved** |
 | BP-05 | Adjacent-interval uncertainty treatment | Point-label, duration-overlap, timestamp-boundary, candidate-group, and exception sensitivity results | **Unresolved — preserve separate outputs** |
 | BP-06 | Full exposure or weighted training sample | Filtered exposure size, sparsity, inclusion probabilities, computational profile, and fidelity checks | **Unresolved — future evaluation remains unsampled** |
@@ -173,15 +174,19 @@ The source-coverage table must contain, at minimum:
 - `coverage_status`
 - `evidence_reference`
 
-Intervals use half-open boundaries, `[interval_start, interval_end)`. Coverage
-start and end values must use the same documented convention. Coverage may vary
-by time or geography and must not be inferred solely from the earliest and latest
-report in the workbook. An interval outside demonstrated coverage is `unknown`,
-not `no_report_observed`.
+Intervals use half-open boundaries, `[interval_start, interval_end)`, and all
+canonical timestamps and interval boundaries are UTC. Coverage start and end
+values must use the same documented convention. Coverage may vary by time or
+geography and must not be inferred solely from the earliest and latest report in
+the workbook. An interval outside demonstrated coverage is `unknown`, not
+`no_report_observed`.
 
-The accepted time-zone and daylight-saving-time policy remains blocked by BP-03.
-The implementation must reject nonexistent or ambiguous local timestamps unless
-the activated plan defines a deterministic, documented treatment.
+The UTC interpretation is based on an electronic communication from the FRA data
+owner dated September 1, 2026. BP-03 remains open only for timestamp semantics
+and any local-time or daylight-saving-time presentation policy. If the activated
+plan converts UTC timestamps for presentation or local operational use, it must
+define a deterministic, documented conversion policy and handle nonexistent or
+ambiguous local times explicitly.
 
 ### Region definitions
 

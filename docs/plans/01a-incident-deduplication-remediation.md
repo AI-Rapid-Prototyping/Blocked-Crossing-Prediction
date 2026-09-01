@@ -147,7 +147,9 @@ bounds and status `unmapped`; it must never receive a default duration.
 ## Source Inventory and Normalization
 
 1. Parse the timestamp into a parallel normalized column without overwriting the
-   original value.
+   original value. Interpret `Date/Time` as UTC, based on an electronic
+   communication from the FRA data owner dated September 1, 2026, and store the
+   normalized value as a timezone-aware UTC timestamp.
 2. Normalize crossing IDs by trimming and uppercasing, then validate the result.
    Invalid IDs remain in the source table but map to documented exceptions rather
    than canonical incidents.
@@ -250,6 +252,7 @@ The run manifest must contain:
 - Python and relevant package versions.
 - Execution timestamp and duration.
 - Output paths and row counts.
+- Timestamp interpretation and its evidence reference.
 - Validation results.
 
 Execution timestamps and durations are allowed to differ between runs. They must
@@ -277,6 +280,8 @@ The timestamp profile must report by year:
 The gate report must use this claim boundary:
 
 - `Date/Time` is a user-entered reported incident date and time.
+- The reported timestamp is in UTC, based on an electronic communication from
+  the FRA data owner dated September 1, 2026.
 - Available evidence does not prove it is submission time, exact physical start
   time, or second-accurate observation time.
 - Duration is a user-selected category, not a verified incident endpoint.
