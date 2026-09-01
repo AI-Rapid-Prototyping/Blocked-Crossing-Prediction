@@ -7,7 +7,8 @@ sequence of evidence needed before more complex models are implemented. Detailed
 implementation decisions belong in phase-specific plans and should be added only
 when their prerequisites are complete.
 
-The active implementation plan is [Phase 1: Incident Deduplication](plans/01-incident-deduplication.md).
+The active implementation plan is
+[Phase 1 Remediation: Auditable Incident Deduplication](plans/01a-incident-deduplication-remediation.md).
 
 ## Objective
 
@@ -266,8 +267,8 @@ reported-event claim boundary.
 
 | Phase | Status | Plan |
 |---|---|---|
-| 1. Source audit and incident deduplication | Planned | [Phase 1 plan](plans/01-incident-deduplication.md) |
-| 2. Reported-event interval, exposure, and geography construction | Not started | To be drafted after Phase 1 |
+| 1. Source audit and incident deduplication | Remediation planned | [Phase 1 remediation plan](plans/01a-incident-deduplication-remediation.md) |
+| 2. Reported-event interval, exposure, and geography construction | Not started — draft blocked by Phase 1 remediation | [Preliminary Phase 2 plan](plans/02-reported-event-interval-exposure-geography.md) |
 | 3. Configurable hotspot cohort and regional screening | Not started | To be drafted after Phase 2 |
 | 4. Pooled timing and geographic baselines | Not started | To be drafted after Phase 3 |
 | 5. Backtesting, calibration, transfer, and threshold selection | Not started | To be drafted after Phase 4 |

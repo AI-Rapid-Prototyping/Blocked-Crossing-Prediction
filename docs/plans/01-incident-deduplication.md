@@ -2,8 +2,10 @@
 
 ## Status
 
-Planned. This document defines the work; it does not authorize later modeling
-phases or changes to raw data.
+Initial implementation reviewed; remediation required. The active plan is
+[Phase 1 Remediation: Auditable Incident Deduplication](01a-incident-deduplication-remediation.md).
+This original document remains the Phase 1 requirements baseline and does not
+authorize later modeling phases or changes to raw data.
 
 Parent roadmap: [Blocked-Crossing Modeling Roadmap](../modeling-roadmap.md)
 
