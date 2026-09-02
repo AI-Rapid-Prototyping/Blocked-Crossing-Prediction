@@ -349,58 +349,91 @@ def generate_duplicate_candidates(incidents: pd.DataFrame, source: pd.DataFrame,
 
     if incidents.empty:
         return pd.DataFrame()
+        
     source = source.copy()
     for column in ("reported_at_local", "iana_time_zone", "utc_offset_minutes"):
         if column not in source.columns:
             source[column] = pd.NA
+            
     primary_details = source.set_index("source_row_id").loc[
         incidents["primary_source_row_id"],
         ["Duration", "norm_duration", "Reason", "State", "City", "reported_at_local", "iana_time_zone", "utc_offset_minutes"],
     ].reset_index().rename(columns={"source_row_id": "primary_source_row_id"})
+    
     work = incidents.merge(primary_details, on="primary_source_row_id", how="left")
     volume = work.groupby("norm_crossing_id")["canonical_incident_id"].transform("size").astype(int)
     work["crossing_volume_tier"] = volume.map(_volume_tier)
+    
     pairs: list[dict[str, Any]] = []
     max_band = max(bands)
-    for crossing_id, group in work.sort_values(["norm_crossing_id", "earliest_reported_at_utc"], kind="stable").groupby("norm_crossing_id", sort=True):
-        records = group.to_dict("records")
-        for left_index, left in enumerate(records):
-            for right in records[left_index + 1 :]:
-                separation = (right["earliest_reported_at_utc"] - left["earliest_reported_at_utc"]).total_seconds() / 60
+    
+    # Sort once upfront instead of per-group
+    work_sorted = work.sort_values(["norm_crossing_id", "earliest_reported_at_utc"], kind="stable")
+    
+    for crossing_id, group in work_sorted.groupby("norm_crossing_id", sort=False):
+        n = len(group)
+        if n < 2:
+            continue
+            
+        # Extract column vectors directly to avoid expensive `to_dict('records')` overhead
+        timestamps = group["earliest_reported_at_utc"].values
+        ids = group["canonical_incident_id"].values
+        reported_local = group["reported_at_local"].values
+        iana_tz = group["iana_time_zone"].values
+        utc_offset = group["utc_offset_minutes"].values
+        dur_raw = group["Duration"].values
+        dur_norm = group["norm_duration"].values
+        reasons = group["Reason"].values
+        states = group["State"].values
+        cities = group["City"].values
+        vol_tiers = group["crossing_volume_tier"].values
+        
+        for left_idx in range(n):
+            t_left = timestamps[left_idx]
+            id_left = ids[left_idx]
+            
+            for right_idx in range(left_idx + 1, n):
+                separation = (timestamps[right_idx] - t_left) / np.timedelta64(1, 'm')
+                
                 if separation > max_band:
                     break
+                    
                 band = next(limit for limit in bands if separation <= limit)
-                pair_id = f"PAIR-{stable_hash(*sorted([left['canonical_incident_id'], right['canonical_incident_id']]), length=20)}"
+                id_right = ids[right_idx]
+                pair_id = f"PAIR-{stable_hash(*sorted([id_left, id_right]), length=20)}"
+                
                 pairs.append(
                     {
                         "candidate_pair_id": pair_id,
-                        "left_incident_id": left["canonical_incident_id"],
-                        "right_incident_id": right["canonical_incident_id"],
+                        "left_incident_id": id_left,
+                        "right_incident_id": id_right,
                         "norm_crossing_id": crossing_id,
                         "separation_minutes": separation,
                         "proximity_band_minutes": band,
-                        "crossing_volume_tier": left["crossing_volume_tier"],
-                        "left_reported_at_utc": left["earliest_reported_at_utc"],
-                        "right_reported_at_utc": right["earliest_reported_at_utc"],
-                        "left_reported_at_local": left["reported_at_local"],
-                        "right_reported_at_local": right["reported_at_local"],
-                        "left_iana_time_zone": left["iana_time_zone"],
-                        "right_iana_time_zone": right["iana_time_zone"],
-                        "left_utc_offset_minutes": left["utc_offset_minutes"],
-                        "right_utc_offset_minutes": right["utc_offset_minutes"],
-                        "left_duration_raw": left["Duration"],
-                        "right_duration_raw": right["Duration"],
-                        "left_duration_normalized": left["norm_duration"],
-                        "right_duration_normalized": right["norm_duration"],
-                        "left_reason": left["Reason"],
-                        "right_reason": right["Reason"],
-                        "state": left["State"],
-                        "city": left["City"],
+                        "crossing_volume_tier": vol_tiers[left_idx],
+                        "left_reported_at_utc": t_left,
+                        "right_reported_at_utc": timestamps[right_idx],
+                        "left_reported_at_local": reported_local[left_idx],
+                        "right_reported_at_local": reported_local[right_idx],
+                        "left_iana_time_zone": iana_tz[left_idx],
+                        "right_iana_time_zone": iana_tz[right_idx],
+                        "left_utc_offset_minutes": utc_offset[left_idx],
+                        "right_utc_offset_minutes": utc_offset[right_idx],
+                        "left_duration_raw": dur_raw[left_idx],
+                        "right_duration_raw": dur_raw[right_idx],
+                        "left_duration_normalized": dur_norm[left_idx],
+                        "right_duration_normalized": dur_norm[right_idx],
+                        "left_reason": reasons[left_idx],
+                        "right_reason": reasons[right_idx],
+                        "state": states[left_idx],
+                        "city": cities[left_idx],
                     }
                 )
+                
     candidates = pd.DataFrame(pairs)
     if candidates.empty:
         return candidates
+    return candidates
 
     # Components are navigation aids only: they never alter canonical assignments.
     parent: dict[str, str] = {}
