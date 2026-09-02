@@ -1,7 +1,7 @@
 {
   "ruleset_version": "phase1-v2",
   "expected_inputs": {
-    "authoritative_sha256": "a4b06d950f20acf8c4eb03930c43b27d399312277b92bd6412d63038de3cfcc1",
+    "authoritative_sha256": "e1a4a457c38fdb7e3f749d5fbc5f35fc436a9af37457acd34d72a710c9fa89f6",
     "reconciliation_sha256": "b85be4137b2ae896d3bc599665879660ca2308892a4efd25c080477202d7302e",
     "inventory_sha256": "2f72388d742fad2cf92142ee6e1fe3fd995d86053a07d56082ed58370cbfbe00"
   },
