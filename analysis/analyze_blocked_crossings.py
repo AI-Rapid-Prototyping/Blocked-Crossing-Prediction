@@ -275,7 +275,6 @@ def main() -> None:
     blocked_joined = blocked.merge(inventory, left_on=['Crossing ID', 'Year'], right_on=['Crossing ID', 'Trains Per Week Captured Year'], how='left', suffixes=('_blocked', '_inventory'))
     blocked_joined.to_csv(output_dir / 'blocked_events_joined_to_inventory.csv', index=False)
     
-    # ToDo: disallow any duplicate Crossing IDs in the Inventory
     blocked_analysis = blocked_joined[blocked_joined["Street_inventory"].isna()==False]     
     blocked_analysis.to_csv(output_dir / 'blocked_events_joined_to_inventory_WithNonzeroTrainActivity.csv', index=False)
 
