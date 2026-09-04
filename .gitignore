@@ -221,3 +221,7 @@ __marimo__/
 analysis_outputs/
 
 data/
+.vscode/settings.json
+.gitignore
+requirements2.txt
+environment.yml

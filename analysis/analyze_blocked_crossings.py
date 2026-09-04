@@ -26,7 +26,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BLOCKED_XLSX = REPO_ROOT / "data" / "blocked_crossings_2025.xlsx"
 DEFAULT_BLOCKED_CSV = REPO_ROOT / "data" / "blocked_crossings_2025(Sheet1).csv"
 DEFAULT_INVENTORY = REPO_ROOT / "data" / "Crossing_Inventory_Data_(Form_71)_-_Current_20260707.csv"
+DEFAULT_GXAPS_DIR = REPO_ROOT / "data"
 DEFAULT_OUTPUT = REPO_ROOT / "analysis_outputs"
+DEFAULT_DISCARDED_GXAPS = DEFAULT_OUTPUT / "discarded_gxaps_records.csv"
+GXAPS_FILE_PATTERN = "GXAPS_*.xlsx"
+GXAPS_SHEET_NAME = "Annual Report"
+GXAPS_DATA_START_ROW = 6
 
 
 def read_csv(path: Path, **kwargs: object) -> pd.DataFrame:
@@ -152,6 +157,90 @@ def preprocess_blocked_crossings(blocked_xlsx: Path, blocked_csv: Path) -> pd.Da
     return blocked
 
 
+def format_gxaps_header_value(value: object) -> str:
+    # Normalize workbook header values so numeric subheaders become stable column names.
+    if pd.isna(value):
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, int):
+        return str(value)
+    return str(value).strip()
+
+
+def merge_gxaps_headers(major_headers: pd.Series, sub_headers: pd.Series) -> tuple[list[str], list[bool]]:
+    # Build human-readable column names from the merged major and sub header rows.
+    columns: list[str] = []
+    keep_mask: list[bool] = []
+    current_major = ""
+    for major_header, sub_header in zip(major_headers, sub_headers, strict=False):
+        major = format_gxaps_header_value(major_header)
+        sub = format_gxaps_header_value(sub_header)
+        if not major and not sub:
+            keep_mask.append(False)
+            continue
+        keep_mask.append(True)
+        if major:
+            current_major = major
+        if sub.isdigit() and current_major:
+            columns.append(f"{current_major} {sub}")
+        elif major and sub:
+            columns.append(f"{major} {sub}")
+        else:
+            columns.append(major or sub)
+    return columns, keep_mask
+
+
+def read_gxaps_annual_report(gxaps_path: Path) -> pd.DataFrame:
+    # Read the annual report with raw rows so the header structure can be reconstructed explicitly.
+    raw = pd.read_excel(gxaps_path, sheet_name=GXAPS_SHEET_NAME, header=None)
+    if not all(isinstance(column, int) for column in raw.columns):
+        return clean_columns(raw)
+
+    # Split the workbook header rows from the data rows and populate all columns.
+    if len(raw.index) < GXAPS_DATA_START_ROW:
+        return clean_columns(raw)
+    header_rows = raw.iloc[:GXAPS_DATA_START_ROW].copy()
+    data = raw.iloc[GXAPS_DATA_START_ROW:].copy()
+    columns, keep_mask = merge_gxaps_headers(header_rows.iloc[4], header_rows.iloc[5])
+    data = data.loc[:, keep_mask]
+    data.columns = columns
+    return clean_columns(data)
+
+
+def preprocess_gxaps(gxaps_dir: Path, output_dir: Path = DEFAULT_OUTPUT) -> pd.DataFrame:
+    # Collect every GXAPS workbook before loading so we can fail fast on missing input.
+    gxaps_paths = sorted(gxaps_dir.glob(GXAPS_FILE_PATTERN))
+    if not gxaps_paths:
+        raise FileNotFoundError(f"No GXAPS workbooks found in {gxaps_dir}")
+
+    # Read the annual report sheet from each workbook and normalize the shared key column.
+    aps_frames: list[pd.DataFrame] = []
+    for gxaps_path in gxaps_paths:
+        frame = read_gxaps_annual_report(gxaps_path)
+        if "Crossing ID" not in frame.columns:
+            raise KeyError(f"Missing expected GXAPS crossing ID column in {gxaps_path.name}: Crossing ID")
+        frame["Crossing ID"] = clean_ids(frame["Crossing ID"])
+        aps_frames.append(frame)
+
+    # Combine all GXAPS workbooks into one dataframe for later use as aps.
+    aps = pd.concat(aps_frames, ignore_index=True, sort=False)
+
+    # Drop workbook total rows before key validation so the SQL-style constraint only sees real crossings.
+    aps = aps.loc[aps["Crossing ID"].notna() & aps["Crossing ID"].astype("string").str.strip().ne("")].copy()
+
+    # Split duplicate crossings into a discard frame and a unique frame for analysis.
+    duplicate_mask = aps["Crossing ID"].duplicated(keep=False)
+    discarded_gxaps_records = aps.loc[duplicate_mask].copy()
+    aps = aps.loc[~duplicate_mask].copy()
+
+    # Write discarded duplicate records so the analysis can continue with unique crossing IDs.
+    output_dir.mkdir(parents=True, exist_ok=True)
+    discarded_gxaps_records.to_csv(output_dir / DEFAULT_DISCARDED_GXAPS.name, index=False)
+
+    return aps
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Join blocked crossing events to Form 71 inventory data.")
     parser.add_argument("--inventory", type=Path, default=DEFAULT_INVENTORY)
@@ -160,6 +249,12 @@ def main() -> None:
 
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load the GXAPS workbooks into aps without joining them to any other frame yet.
+    #aps = preprocess_gxaps(DEFAULT_GXAPS_DIR, DEFAULT_OUTPUT)
+    # Inspect the deduplicated GXAPS frame and confirm the primary key is unique.
+    #print(aps.head())
+    #print(pd.DataFrame([('aps_rows', len(aps)), ('aps_crossing_ids', aps['Crossing ID'].nunique())], columns=['metric', 'value']))
 
     blocked = preprocess_blocked_crossings(DEFAULT_BLOCKED_XLSX, DEFAULT_BLOCKED_CSV)
     inventory = clean_columns(read_csv(args.inventory, low_memory=False))
@@ -171,13 +266,17 @@ def main() -> None:
     inventory = inventory.sort_values(["Crossing ID", "Revision Date"]).drop_duplicates("Crossing ID", keep="last")
 
     blocked = blocked.dropna(subset=["Crossing ID"]).copy()
+    blocked["Year"] = blocked["Date/Time"].dt.year     
 
     blocked_counts = blocked.groupby("Crossing ID").size().rename("blocked_event_count").reset_index()
     inventory_with_counts = inventory.merge(blocked_counts, on="Crossing ID", how="left")
     inventory_with_counts["blocked_event_count"] = inventory_with_counts["blocked_event_count"].fillna(0).astype(int)
 
-    blocked_joined = blocked.merge(inventory, on="Crossing ID", how="left", suffixes=("_blocked", "_inventory"))
-    blocked_joined.to_csv(output_dir / "blocked_events_joined_to_inventory.csv", index=False)
+    blocked_joined = blocked.merge(inventory, left_on=['Crossing ID', 'Year'], right_on=['Crossing ID', 'Trains Per Week Captured Year'], how='left', suffixes=('_blocked', '_inventory'))
+    blocked_joined.to_csv(output_dir / 'blocked_events_joined_to_inventory.csv', index=False)
+    
+    blocked_analysis = blocked_joined[blocked_joined["Street_inventory"].isna()==False]     
+    blocked_analysis.to_csv(output_dir / 'blocked_events_joined_to_inventory_WithNonzeroTrainActivity.csv', index=False)
 
     blocked_inventory = inventory_with_counts[inventory_with_counts["blocked_event_count"] > 0].copy()
     inventory_with_counts["is_blocked"] = inventory_with_counts["blocked_event_count"] > 0
