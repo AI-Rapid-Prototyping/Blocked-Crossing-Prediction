@@ -251,11 +251,10 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load the GXAPS workbooks into aps without joining them to any other frame yet.
-    aps = preprocess_gxaps(DEFAULT_GXAPS_DIR, DEFAULT_OUTPUT)
-
+    #aps = preprocess_gxaps(DEFAULT_GXAPS_DIR, DEFAULT_OUTPUT)
     # Inspect the deduplicated GXAPS frame and confirm the primary key is unique.
-    print(aps.head())
-    print(pd.DataFrame([('aps_rows', len(aps)), ('aps_crossing_ids', aps['Crossing ID'].nunique())], columns=['metric', 'value']))
+    #print(aps.head())
+    #print(pd.DataFrame([('aps_rows', len(aps)), ('aps_crossing_ids', aps['Crossing ID'].nunique())], columns=['metric', 'value']))
 
     blocked = preprocess_blocked_crossings(DEFAULT_BLOCKED_XLSX, DEFAULT_BLOCKED_CSV)
     inventory = clean_columns(read_csv(args.inventory, low_memory=False))
@@ -267,13 +266,18 @@ def main() -> None:
     inventory = inventory.sort_values(["Crossing ID", "Revision Date"]).drop_duplicates("Crossing ID", keep="last")
 
     blocked = blocked.dropna(subset=["Crossing ID"]).copy()
+    blocked["Year"] = blocked["Date/Time"].dt.year     
 
     blocked_counts = blocked.groupby("Crossing ID").size().rename("blocked_event_count").reset_index()
     inventory_with_counts = inventory.merge(blocked_counts, on="Crossing ID", how="left")
     inventory_with_counts["blocked_event_count"] = inventory_with_counts["blocked_event_count"].fillna(0).astype(int)
 
-    blocked_joined = blocked.merge(inventory, on="Crossing ID", how="left", suffixes=("_blocked", "_inventory"))
-    blocked_joined.to_csv(output_dir / "blocked_events_joined_to_inventory.csv", index=False)
+    blocked_joined = blocked.merge(inventory, left_on=['Crossing ID', 'Year'], right_on=['Crossing ID', 'Trains Per Week Captured Year'], how='left', suffixes=('_blocked', '_inventory'))
+    blocked_joined.to_csv(output_dir / 'blocked_events_joined_to_inventory.csv', index=False)
+    
+    # ToDo: disallow any duplicate Crossing IDs in the Inventory
+    blocked_analysis = blocked_joined[blocked_joined["Street_inventory"].isna()==False]     
+    blocked_analysis.to_csv(output_dir / 'blocked_events_joined_to_inventory_WithNonzeroTrainActivity.csv', index=False)
 
     blocked_inventory = inventory_with_counts[inventory_with_counts["blocked_event_count"] > 0].copy()
     inventory_with_counts["is_blocked"] = inventory_with_counts["blocked_event_count"] > 0
