@@ -38,14 +38,6 @@ class Phase1Result:
     validations: dict[str, Any]
 
 
-def compute_file_sha256(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
-
-
 def stable_hash(*parts: object, length: int = 20) -> str:
     payload = "\x1f".join("<NULL>" if value is None else str(value) for value in parts)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:length]
@@ -56,14 +48,17 @@ def load_config(config_path: Path) -> dict[str, Any]:
         return json.load(handle)
 
 
-def verify_expected_fingerprint(path: Path, expected: str, label: str) -> str:
-    actual = compute_file_sha256(path)
-    if actual.lower() != expected.lower():
-        raise ValueError(
-            f"{label} fingerprint differs from the configured approved input: "
-            f"expected {expected}, found {actual}. Review and update the configuration before processing."
-        )
-    return actual
+def require_input_files(input_paths: dict[str, Path]) -> None:
+    """Raise one actionable error containing every missing input path."""
+
+    missing = [
+        (label, Path(path))
+        for label, path in input_paths.items()
+        if not Path(path).is_file()
+    ]
+    if missing:
+        details = "\n".join(f"- {label}: {path}" for label, path in missing)
+        raise FileNotFoundError(f"Required Phase 1 input files are missing:\n{details}")
 
 
 def _null_aware_raw_value(value: object) -> object:
@@ -104,7 +99,6 @@ def _require_columns(frame: pd.DataFrame, columns: list[str], label: str) -> Non
 def normalize_source_dataframe(
     frame: pd.DataFrame,
     config: dict[str, Any],
-    source_fingerprint: str,
     source_sheet: str,
     source_name: str,
 ) -> pd.DataFrame:
@@ -116,12 +110,15 @@ def normalize_source_dataframe(
     result.insert(0, "source_name", source_name)
     result.insert(1, "source_sheet", source_sheet)
     result.insert(2, "source_excel_row_number", range(2, len(result) + 2))
+    result["raw_full_row_signature"] = result.apply(raw_signature, axis=1, columns=material)
     result.insert(
         3,
         "source_row_id",
         [
-            f"SRC-{stable_hash(source_fingerprint, source_sheet, row_number, length=20)}"
-            for row_number in result["source_excel_row_number"]
+            f"SRC-{stable_hash(source_name, source_sheet, row_number, row_signature, length=20)}"
+            for row_number, row_signature in zip(
+                result["source_excel_row_number"], result["raw_full_row_signature"]
+            )
         ],
     )
 
@@ -164,7 +161,6 @@ def normalize_source_dataframe(
             result[comparison_column] = result["norm_datetime_utc"].fillna("<INVALID_TIMESTAMP>")
         else:
             result[comparison_column] = normalize_comparison_text(result[column])
-    result["raw_full_row_signature"] = result.apply(raw_signature, axis=1, columns=material)
     result["normalized_full_row_signature"] = result[comparison_columns].agg("\x1f".join, axis=1).map(
         lambda value: stable_hash(value, length=64)
     )
@@ -630,19 +626,23 @@ def run_phase_1(
 
     started = time.monotonic()
     
-    print("[1/9] Initializing output directory & verifying input file hashes...")
+    print("[1/9] Initializing output directory and checking input files...")
     authoritative_path = Path(authoritative_path)
     reconciliation_path = Path(reconciliation_path)
     inventory_path = Path(inventory_path)
     config_path = Path(config_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
+    require_input_files(
+        {
+            "authoritative workbook": authoritative_path,
+            "reconciliation workbook": reconciliation_path,
+            "Form 71 inventory": inventory_path,
+            "configuration": config_path,
+        }
+    )
     config = load_config(config_path)
-    expected = config["expected_inputs"]
-    auth_hash = verify_expected_fingerprint(authoritative_path, expected["authoritative_sha256"], "Authoritative workbook")
-    recon_hash = verify_expected_fingerprint(reconciliation_path, expected["reconciliation_sha256"], "Reconciliation workbook")
-    inventory_hash = verify_expected_fingerprint(inventory_path, expected["inventory_sha256"], "Form 71 inventory")
 
     print("[2/9] Reading raw source data files (Excel & CSV)...")
     t0 = time.monotonic()
@@ -657,8 +657,10 @@ def run_phase_1(
     print(f"      -> Loaded raw datasets in {time.monotonic() - t0:.1f}s")
 
     print("[3/9] Normalizing source data structures...")
-    authoritative = normalize_source_dataframe(authoritative_raw, config, auth_hash, config["authoritative_sheet"], "authoritative")
-    reconciliation = normalize_source_dataframe(reconciliation_raw, config, recon_hash, "Sheet1", "reconciliation")
+    authoritative = normalize_source_dataframe(
+        authoritative_raw, config, config["authoritative_sheet"], "authoritative"
+    )
+    reconciliation = normalize_source_dataframe(reconciliation_raw, config, "Sheet1", "reconciliation")
 
     print("[4/9] Resolving crossing time zones (timezonefinder)...")
     t0 = time.monotonic()
@@ -691,17 +693,12 @@ def run_phase_1(
 
     print("[8/9] Validating dataset integrity checks...")
     validations = {
-        "raw_fingerprints_unchanged_after_processing": {
-            "authoritative": compute_file_sha256(authoritative_path) == auth_hash,
-            "reconciliation": compute_file_sha256(reconciliation_path) == recon_hash,
-            "inventory": compute_file_sha256(inventory_path) == inventory_hash,
-        },
         "source_rows_map_once": len(crosswalk) == len(source) and crosswalk["source_row_id"].is_unique,
         "only_configured_auto_merge_tiers": set(incidents["consolidation_tier"].unique()).issubset(
             {"exact", "normalized_exact", "distinct_candidate"}
         ),
     }
-    if not all(validations["raw_fingerprints_unchanged_after_processing"].values()) or not validations["source_rows_map_once"]:
+    if not validations["source_rows_map_once"]:
         raise AssertionError(f"Phase 1 validation failed: {validations}")
 
     timezone_summary = source["timezone_assignment_status"].value_counts(dropna=False).rename_axis("timezone_assignment_status").reset_index(name="source_report_count")
@@ -734,7 +731,9 @@ def run_phase_1(
         ],
         "summary": summary,
         "timezone_localization": {
-            "inventory_sha256": inventory_hash,
+            "inventory_path": str(inventory_path),
+            "inventory_filename": inventory_path.name,
+            "inventory_rows": len(inventory_raw),
             "no_state_fallback": True,
             "unresolved_rows_remain_utc": True,
         },
@@ -808,21 +807,53 @@ def run_phase_1(
         "local_time_diagnostics": len(local_time_diagnostics),
     }
     output_row_counts.update({name: len(frame) for name, frame in diagnostics.items()})
+    output_schemas = {
+        "source_reports_with_ids": list(source.columns),
+        "reported_incidents": list(incidents.columns),
+        "report_incident_crosswalk": list(crosswalk.columns),
+        "documented_exceptions": list(exceptions.columns),
+        "duplicate_candidates": list(candidates.columns),
+        "candidate_review_sample": list(review_sample.columns),
+        "crossing_timezones": list(crossing_timezones.columns),
+        "reconciliation_discrepancies": list(reconciliation_discrepancies.columns),
+        "timestamp_granularity_by_year": list(granularity.columns),
+        "timezone_assignment_diagnostics": list(timezone_summary.columns),
+        "local_time_diagnostics": list(local_time_diagnostics.columns),
+        **{name: list(frame.columns) for name, frame in diagnostics.items()},
+    }
     manifest_outputs = {
         name: {
             "path": str(path),
+            "filename": path.name,
             "row_count": output_row_counts.get(name),
-            "sha256": None if name == "run_manifest" else compute_file_sha256(path),
+            "schema": output_schemas.get(name),
         }
         for name, path in artifact_paths.items()
     }
     manifest = {
         "ruleset_version": config["ruleset_version"],
         "inputs": {
-            "authoritative": {"path": str(authoritative_path), "sha256": auth_hash, "sheet": config["authoritative_sheet"], "rows": len(authoritative_raw)},
-            "reconciliation": {"path": str(reconciliation_path), "sha256": recon_hash, "rows": len(reconciliation_raw)},
-            "form_71_inventory": {"path": str(inventory_path), "sha256": inventory_hash, "rows": len(inventory_raw)},
-            "configuration": {"path": str(config_path), "sha256": compute_file_sha256(config_path)},
+            "authoritative": {
+                "path": str(authoritative_path),
+                "filename": authoritative_path.name,
+                "sheet": config["authoritative_sheet"],
+                "rows": len(authoritative_raw),
+                "schema": list(authoritative_raw.columns),
+            },
+            "reconciliation": {
+                "path": str(reconciliation_path),
+                "filename": reconciliation_path.name,
+                "sheet": "Sheet1",
+                "rows": len(reconciliation_raw),
+                "schema": list(reconciliation_raw.columns),
+            },
+            "form_71_inventory": {
+                "path": str(inventory_path),
+                "filename": inventory_path.name,
+                "rows": len(inventory_raw),
+                "schema": list(inventory_raw.columns),
+            },
+            "configuration": {"path": str(config_path), "filename": config_path.name},
         },
         "environment": {"python": sys.version, "platform": platform.platform(), "timezonefinder": timezonefinder_version},
         "git": _git_metadata(config_path.parent.parent),

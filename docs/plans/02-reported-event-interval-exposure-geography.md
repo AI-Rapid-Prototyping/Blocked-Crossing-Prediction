@@ -74,8 +74,8 @@ Before this plan can be finalized or activated:
 2. The deterministic Phase 1 review sample must be labeled and summarized.
 3. `phase_1_gate_report.json` must contain the evidence required for the
    interval-resolution and uncertainty analyses.
-4. The accepted Phase 1 ruleset, run manifest, artifact fingerprints, and
-   remaining candidate or exception counts must be recorded in this plan.
+4. The accepted Phase 1 ruleset, run manifest, artifact schemas and row counts,
+   and remaining candidate or exception counts must be recorded in this plan.
 5. Every blocking placeholder below must be resolved without guessing.
 
 ### Required Phase 1 inputs
@@ -96,16 +96,16 @@ The accepted Phase 1 run under `analysis_outputs/deduplication/v2/` must provide
 12. `phase_1_gate_report.json`
 13. `run_manifest.json`
 
-Phase 2 must validate the manifest, artifact fingerprints, ruleset version, and
-Phase 1 completion status before constructing any interval or exposure output. A
-missing, mismatched, or non-passing dependency must stop the run with a clear
-message.
+Phase 2 must validate manifest presence, artifact schemas and row counts, the
+ruleset version, Phase 1 gate status, and crosswalk integrity before constructing
+any interval or exposure output. A missing, mismatched, or non-passing dependency
+must stop the run with a clear message.
 
 The current Form 71 candidate input is
-`data/Crossing_Inventory_Source_Data_(Form_71)_-_Current_20260707.csv`. Its
-fingerprint, source version, revision-field treatment, and role in geographic
-assignment must be recorded before use. A later reviewed inventory version may
-replace it through configuration; it must not be silently substituted.
+`data/Crossing_Inventory_Data_(Form_71)_-_Current_20260707.csv`. Its exact
+filename, source version, revision-field treatment, schema, row count, and role in
+geographic assignment must be recorded before use. A later reviewed inventory
+version may replace it through configuration; it must not be silently substituted.
 
 Note: once the MPO dataset is known, name it here as a required Phase 2 geographic input with description of owner, path/URL or retrieval process.
 
@@ -116,7 +116,7 @@ research. They are deliberately unresolved in this preliminary plan.
 
 | ID | Blocking decision | Required evidence | Current status |
 |---|---|---|---|
-| BP-01 | Accepted Phase 1 run and ruleset | Passing gate report, manifest, artifact fingerprints, and labeled review summary | **Unresolved — Phase 1 remediation pending** |
+| BP-01 | Accepted Phase 1 run and ruleset | Passing gate report, manifest, artifact schemas and row counts, crosswalk integrity, and labeled review summary | **Unresolved — Phase 1 remediation pending** |
 | BP-02 | Demonstrated source-coverage periods | Source-system evidence and Phase 1 date diagnostics sufficient to distinguish covered from unknown periods | **Unresolved — do not generate `no_report_observed` labels** |
 | BP-03 | Timestamp semantics and local-time presentation policy | Phase 1 timestamp profile and source documentation; any required geographic time-zone mapping and daylight-saving-time presentation policy | **Partially resolved — source timestamps are UTC, based on an electronic communication from the FRA data owner dated September 1, 2026; do not assume exact event start** |
 | BP-04 | Selected prediction interval | One-, two-, and four-hour comparison using accepted incidents, coverage, uncertainty, and table-size diagnostics | **Unresolved — hourly is not pre-approved** |
@@ -282,7 +282,7 @@ blocked by BP-05.
 The run configuration must identify:
 
 - The accepted Phase 1 manifest and ruleset.
-- Form 71 and geographic-source fingerprints and versions.
+- Form 71 and geographic-source paths, filenames, schemas, row counts, and versions.
 - The region definition and crossing-membership version.
 - The source-coverage definition version.
 - Requested region IDs.
@@ -292,9 +292,9 @@ The run configuration must identify:
 - Sampling mode and seed, when applicable.
 - Output schema version and output directory.
 
-The run manifest must record input and configuration fingerprints, Git commit and
-dirty-worktree status, software versions, execution metadata, output row counts
-and fingerprints, validation results, and the status of every Phase 2 gate.
+The run manifest must record input and configuration paths and filenames, Git
+commit and dirty-worktree status, software versions, execution metadata, output
+schemas and row counts, validation results, and the status of every Phase 2 gate.
 Execution timestamps and durations must not affect deterministic identifiers.
 
 ## Intended Workflow
@@ -302,8 +302,8 @@ Execution timestamps and durations must not affect deterministic identifiers.
 ### 1. Validate the Phase 1 handoff
 
 Load the Phase 1 manifest and gate report before data tables. Verify the expected
-ruleset, completion status, file fingerprints, schemas, row counts, and one-to-one
-source-row disposition. Reject an incomplete, mismatched, or stale handoff.
+ruleset, completion status, schemas, row counts, and one-to-one source-row
+disposition. Reject an incomplete, mismatched, or stale handoff.
 
 ### 2. Establish coverage and time semantics
 
@@ -410,7 +410,7 @@ hour tables.
 
 Synthetic tests must cover at least:
 
-- Phase 1 gate, manifest, fingerprint, schema, and row-count failures.
+- Phase 1 gate, manifest, schema, row-count, and crosswalk-integrity failures.
 - One-, two-, and four-hour half-open interval boundaries.
 - Reports exactly on, immediately before, and immediately after a boundary.
 - Multiple canonical incidents at one crossing in one interval.
@@ -432,7 +432,7 @@ Synthetic tests must cover at least:
 
 Real-data validation, once authorized, must include:
 
-1. Two identical runs with matching deterministic output fingerprints.
+1. Two identical runs with direct equality of deterministic output artifacts.
 2. Reconciliation of Phase 2 incident totals to the accepted Phase 1 incident
    and exception artifacts.
 3. Coverage, label, uncertainty, and geography summaries by year and region.

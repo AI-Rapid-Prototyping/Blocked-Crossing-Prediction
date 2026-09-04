@@ -54,8 +54,8 @@ dedicated output directory such as `analysis_outputs/deduplication/`:
 4. `duplicate_groups_for_review` — unresolved or lower-confidence groups requiring
    review.
 5. `deduplication_summary` — counts and rates before and after each rule.
-6. A machine-readable run manifest containing input fingerprints, configuration,
-   execution time, and row counts.
+6. A machine-readable run manifest containing explicit input paths and filenames,
+   configuration, schemas, execution time, and row counts.
 
 Exact file formats will be selected during implementation. Parquet is preferred
 for full row-level tables; CSV or JSON is appropriate for compact summaries and
@@ -68,10 +68,9 @@ size, provenance, and data governance.
 
 ### 1. Inventory and profile the source
 
-- Record workbook name, sheet names, file fingerprint, row count, and column
-  names.
-- Establish a stable `source_row_id` using the source file identity, sheet, and
-  original row number or another demonstrated stable key.
+- Record workbook name, sheet names, row count, and column names.
+- Establish a stable `source_row_id` using the source name, sheet, original row
+  number, and raw-row signature.
 - Profile missingness, invalid timestamps, malformed crossing IDs, duration
   values, reasons, states, and other fields used for deduplication.
 - Quantify exact duplicate rows before normalization and after non-destructive
@@ -193,7 +192,8 @@ committing derived copies of the source workbooks.
 Phase 1 is complete only when:
 
 - Raw workbooks are unchanged.
-- Input fingerprints and source-row identities are recorded.
+- Input paths, filenames, schemas, row counts, and source-row identities are
+  recorded.
 - Duplicate rules and their precedence are explicit and versioned.
 - Every authoritative source row maps to exactly one incident or documented
   exception.

@@ -51,7 +51,7 @@ def report(**overrides: object) -> dict[str, object]:
 class IncidentDeduplicationTests(unittest.TestCase):
     def normalize(self, rows: list[dict[str, object]]) -> pd.DataFrame:
         return mod.normalize_source_dataframe(
-            pd.DataFrame(rows), CONFIG, "f" * 64, "Sheet1", "authoritative"
+            pd.DataFrame(rows), CONFIG, "Sheet1", "authoritative"
         )
 
     def test_duration_categories_aliases_and_unmapped_values(self) -> None:
@@ -145,7 +145,69 @@ class IncidentDeduplicationTests(unittest.TestCase):
         self.assertTrue(callable(mod.run_phase_1))
         self.assertEqual(mod.__name__, "incident_deduplication")
 
-    def test_full_pipeline_writes_fingerprinted_artifacts(self) -> None:
+    def test_missing_inputs_are_reported_together(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            data_dir = Path(temporary_directory) / "data"
+            input_paths = {
+                "authoritative": data_dir / "blocked_crossings_2020through2025.xlsx",
+                "reconciliation": data_dir / "blocked_crossings_2025.xlsx",
+                "form_71_inventory": (
+                    data_dir / "Crossing_Inventory_Data_(Form_71)_-_Current_20260707.csv"
+                ),
+            }
+
+            with self.assertRaises(FileNotFoundError) as raised:
+                mod.require_input_files(input_paths)
+
+            message = str(raised.exception)
+            for path in input_paths.values():
+                self.assertIn(str(path), message)
+
+    def test_source_ids_ignore_container_bytes(self) -> None:
+        rows = [report(), report(Reason="A moving train"), report(**{"Crossing ID": "bad"})]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            first_path = root / "first.xlsx"
+            second_path = root / "second.xlsx"
+            pd.DataFrame(rows).to_excel(first_path, index=False)
+            second_path.write_bytes(first_path.read_bytes() + b"container-only-difference")
+            self.assertNotEqual(first_path.read_bytes(), second_path.read_bytes())
+
+            first_frame = pd.read_excel(first_path)
+            second_frame = pd.read_excel(second_path)
+        first = mod.normalize_source_dataframe(
+            first_frame, CONFIG, "Sheet1", "authoritative"
+        )
+        second = mod.normalize_source_dataframe(
+            second_frame, CONFIG, "Sheet1", "authoritative"
+        )
+        self.assertEqual(first["source_row_id"].tolist(), second["source_row_id"].tolist())
+        first_incidents, first_crosswalk, first_exceptions = mod.consolidate_reports(
+            first, CONFIG
+        )
+        second_incidents, second_crosswalk, second_exceptions = mod.consolidate_reports(
+            second, CONFIG
+        )
+        self.assertEqual(
+            first_incidents["canonical_incident_id"].tolist(),
+            second_incidents["canonical_incident_id"].tolist(),
+        )
+        pd.testing.assert_frame_equal(first_crosswalk, second_crosswalk)
+        self.assertEqual(
+            first_exceptions["exception_id"].tolist(), second_exceptions["exception_id"].tolist()
+        )
+        first_candidates = mod.generate_duplicate_candidates(
+            first_incidents, first, CONFIG["proximity_bands_minutes"]
+        )
+        second_candidates = mod.generate_duplicate_candidates(
+            second_incidents, second, CONFIG["proximity_bands_minutes"]
+        )
+        self.assertEqual(
+            first_candidates["candidate_pair_id"].tolist(),
+            second_candidates["candidate_pair_id"].tolist(),
+        )
+
+    def test_full_pipeline_accepts_unfingerprinted_inputs_and_records_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             authoritative_path = root / "authoritative.xlsx"
@@ -155,20 +217,14 @@ class IncidentDeduplicationTests(unittest.TestCase):
             output_dir = root / "output"
             pd.DataFrame([
                 report(),
-                report(**{"Date/Time": "2025-01-01 12:10:00", "Reason": "A moving train"}),
+                report(**{"Date/Time": "2025-01-01 15:10:00", "Reason": "A moving train"}),
             ]).to_excel(authoritative_path, index=False)
             pd.DataFrame([report()]).to_excel(reconciliation_path, index=False)
             pd.DataFrame([{
-                "Crossing ID": "123456A", "Latitude": 40.7, "Longitude": -74.0,
+                "Crossing ID": "123456A", "Latitude": None, "Longitude": None,
                 "Revision Date": "2025-01-01",
             }]).to_csv(inventory_path, index=False)
-            config = dict(CONFIG)
-            config["expected_inputs"] = {
-                "authoritative_sha256": mod.compute_file_sha256(authoritative_path),
-                "reconciliation_sha256": mod.compute_file_sha256(reconciliation_path),
-                "inventory_sha256": mod.compute_file_sha256(inventory_path),
-            }
-            config_path.write_text(json.dumps(config), encoding="utf-8")
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
             result = mod.run_phase_1(
                 authoritative_path, reconciliation_path, inventory_path, config_path, output_dir
             )
@@ -176,7 +232,23 @@ class IncidentDeduplicationTests(unittest.TestCase):
             self.assertEqual(result.summary["candidate_reported_incidents"], 2)
             self.assertTrue((output_dir / "crossing_timezones.parquet").exists())
             manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
-            self.assertIsNotNone(manifest["outputs"]["source_reports_with_ids"]["sha256"])
+            self.assertEqual(
+                manifest["inputs"]["authoritative"]["filename"], "authoritative.xlsx"
+            )
+            self.assertEqual(manifest["inputs"]["authoritative"]["sheet"], "Sheet1")
+            self.assertEqual(manifest["inputs"]["authoritative"]["rows"], 2)
+            self.assertEqual(
+                manifest["inputs"]["authoritative"]["schema"], CONFIG["material_columns"]
+            )
+            self.assertEqual(
+                manifest["outputs"]["source_reports_with_ids"]["filename"],
+                "source_reports_with_ids.parquet",
+            )
+            self.assertIn(
+                "source_row_id", manifest["outputs"]["source_reports_with_ids"]["schema"]
+            )
+            self.assertNotIn("sha256", json.dumps(manifest).lower())
+            self.assertNotIn("fingerprint", json.dumps(result.validations).lower())
 
 
 if __name__ == "__main__":

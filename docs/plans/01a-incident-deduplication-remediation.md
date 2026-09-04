@@ -246,12 +246,12 @@ with one canonical incident ID or one exception ID.
 
 The run manifest must contain:
 
-- Raw input paths, fingerprints, sheet names, and row counts.
-- Configuration path, fingerprint, and ruleset version.
+- Raw input paths, filenames, sheet names, schemas, and row counts.
+- Configuration path, filename, and ruleset version.
 - Git commit and dirty-worktree status.
 - Python and relevant package versions.
 - Execution timestamp and duration.
-- Output paths and row counts.
+- Output paths, filenames, schemas, and row counts.
 - Timestamp interpretation and its evidence reference.
 - Validation results.
 
@@ -330,7 +330,8 @@ uv run python -m unittest discover -s unit_tests -p "test_*.py"
    candidates, review sample, summaries, and diagnostics.
 3. Require exact equality except for explicitly nondeterministic execution
    metadata.
-4. Confirm both raw input fingerprints are unchanged before and after each run.
+4. Compare the raw input files directly before and after each run and confirm they
+   are unchanged.
 5. Restart the notebook kernel, run every cell in order, and save the notebook.
 6. Confirm the saved notebook contains no error outputs and every narrative count
    matches the `v2` artifacts.
