@@ -276,7 +276,7 @@ def main() -> None:
     blocked_joined.to_csv(output_dir / 'blocked_events_joined_to_inventory.csv', index=False)
     
     blocked_analysis = blocked_joined[blocked_joined["Street_inventory"].isna()==False]     
-    blocked_analysis.to_csv(output_dir / 'blocked_events_joined_to_inventory_WithNonzeroTrainActivity.csv', index=False)
+    blocked_analysis.to_csv(output_dir / 'blocked_events_joined_to_inventory_WithAssociatedTrainActivity.csv', index=False)
 
     blocked_inventory = inventory_with_counts[inventory_with_counts["blocked_event_count"] > 0].copy()
     inventory_with_counts["is_blocked"] = inventory_with_counts["blocked_event_count"] > 0
