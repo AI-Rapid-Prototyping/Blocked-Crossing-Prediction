@@ -159,6 +159,10 @@ def normalize_source_dataframe(
         comparison_columns.append(comparison_column)
         if column == "Date/Time":
             result[comparison_column] = result["norm_datetime_utc"].fillna("<INVALID_TIMESTAMP>")
+        elif column == "Duration":
+            # Compare known aliases by their canonical category while retaining
+            # normalized raw values for unmapped durations.
+            result[comparison_column] = normalize_comparison_text(canonical_duration)
         else:
             result[comparison_column] = normalize_comparison_text(result[column])
     result["normalized_full_row_signature"] = result[comparison_columns].agg("\x1f".join, axis=1).map(
@@ -274,10 +278,10 @@ def enrich_with_local_time(source: pd.DataFrame, crossing_timezones: pd.DataFram
         mask = result["timezone_assignment_status"].eq("assigned") & result["iana_time_zone"].eq(zone)
         local = result.loc[mask, "reported_at_utc"].dt.tz_convert(ZoneInfo(zone))
         result.loc[mask, "reported_at_local"] = local.dt.strftime("%Y-%m-%dT%H:%M:%S%z")
-        
-        # VECTORIZED FIX: Avoids python lambda loop by using pandas .dt accessor
-        result.loc[mask, "utc_offset_minutes"] = (local.dt.utcoffset().dt.total_seconds() // 60).astype("Int64")
-        
+        result.loc[mask, "utc_offset_minutes"] = local.map(
+            lambda timestamp: timestamp.utcoffset().total_seconds() // 60
+        ).astype("Int64")
+
         result.loc[mask, "reported_local_date"] = local.dt.strftime("%Y-%m-%d")
         result.loc[mask, "reported_local_hour"] = local.dt.hour.astype("Int64")
     return result
@@ -446,7 +450,6 @@ def generate_duplicate_candidates(incidents: pd.DataFrame, source: pd.DataFrame,
     candidates = pd.DataFrame(pairs)
     if candidates.empty:
         return candidates
-    return candidates
 
     # Components are navigation aids only: they never alter canonical assignments.
     parent: dict[str, str] = {}
