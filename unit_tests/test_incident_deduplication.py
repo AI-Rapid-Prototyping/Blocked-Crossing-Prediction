@@ -65,6 +65,26 @@ class IncidentDeduplicationTests(unittest.TestCase):
         self.assertEqual(source.loc[10, "duration_normalization_status"], "unmapped")
         self.assertTrue(pd.isna(source.loc[10, "duration_upper_minutes"]))
 
+    def test_duration_aliases_share_normalized_deduplication_signature(self) -> None:
+        source = self.normalize(
+            [report(Duration="2-6 hours"), report(Duration="2-6 hours'")]
+        )
+        unmapped = self.normalize(
+            [report(Duration="unexpected duration"), report(Duration="another duration")]
+        )
+
+        self.assertEqual(
+            source.loc[0, "normalized_full_row_signature"],
+            source.loc[1, "normalized_full_row_signature"],
+        )
+        self.assertNotEqual(
+            unmapped.loc[0, "normalized_full_row_signature"],
+            unmapped.loc[1, "normalized_full_row_signature"],
+        )
+        incidents, _, _ = mod.consolidate_reports(source, CONFIG)
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents.loc[0, "consolidation_tier"], "normalized_exact")
+
     def test_full_row_rules_keep_conflicting_reports_distinct(self) -> None:
         rows = [report(), report(), report(Reason="A moving train"), report(**{"Immediate Impacts": "Emergency response"})]
         source = self.normalize(rows)
@@ -95,6 +115,33 @@ class IncidentDeduplicationTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates.loc[0, "proximity_band_minutes"], 15)
 
+    def test_connected_candidate_pairs_share_deterministic_group_id(self) -> None:
+        source = self.normalize(
+            [
+                report(Reason="A"),
+                report(**{"Date/Time": "2025-01-01 13:40:00", "Reason": "B"}),
+                report(**{"Date/Time": "2025-01-01 15:20:00", "Reason": "C"}),
+            ]
+        )
+        incidents, _, _ = mod.consolidate_reports(source, CONFIG)
+
+        first = mod.generate_duplicate_candidates(
+            incidents, source, CONFIG["proximity_bands_minutes"]
+        )
+        second = mod.generate_duplicate_candidates(
+            incidents.sample(frac=1, random_state=7),
+            source.sample(frac=1, random_state=11),
+            CONFIG["proximity_bands_minutes"],
+        )
+
+        self.assertEqual(len(first), 2)
+        self.assertTrue(first["candidate_group_id"].notna().all())
+        self.assertEqual(first["candidate_group_id"].nunique(), 1)
+        self.assertEqual(
+            first.set_index("candidate_pair_id")["candidate_group_id"].to_dict(),
+            second.set_index("candidate_pair_id")["candidate_group_id"].to_dict(),
+        )
+
     def test_timezone_localization_uses_coordinate_not_state_and_preserves_utc(self) -> None:
         inventory = pd.DataFrame(
             [
@@ -107,6 +154,7 @@ class IncidentDeduplicationTests(unittest.TestCase):
         enriched = mod.enrich_with_local_time(source, lookup)
         self.assertEqual(enriched.loc[0, "reported_at_utc"].isoformat(), "2025-01-01T12:00:00+00:00")
         self.assertEqual(enriched.loc[0, "reported_at_local"], "2025-01-01T07:00:00-0500")
+        self.assertEqual(enriched.loc[0, "utc_offset_minutes"], -300)
         self.assertEqual(enriched.loc[1, "timezone_assignment_status"], "invalid_inventory_coordinates")
         self.assertEqual(enriched.loc[2, "timezone_assignment_status"], "no_inventory_match")
         self.assertTrue(pd.isna(enriched.loc[2, "reported_at_local"]))
@@ -123,6 +171,7 @@ class IncidentDeduplicationTests(unittest.TestCase):
         self.assertEqual(local.loc[0, "reported_at_local"], "2025-03-09T03:30:00-0400")
         self.assertEqual(local.loc[1, "reported_at_local"], "2025-11-02T01:30:00-0400")
         self.assertEqual(local.loc[2, "reported_at_local"], "2025-11-02T01:30:00-0500")
+        self.assertEqual(local["utc_offset_minutes"].tolist(), [-240, -240, -300])
 
     def test_reconciliation_is_full_row_and_multiplicity_aware(self) -> None:
         authoritative = self.normalize([report(), report(), report(Reason="A moving train")])
