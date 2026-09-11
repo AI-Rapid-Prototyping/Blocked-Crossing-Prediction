@@ -196,6 +196,10 @@ of a phase updates this roadmap before the next plan is finalized.
 
 ### After Phase 1
 
+- Consolidate reports automatically only when all 11 material fields match
+  exactly or after documented, meaning-preserving normalization. Temporal
+  proximity remains review-only evidence and does not change canonical incident
+  assignments.
 - Confirm the meaning and precision of `Date/Time`.
 - Quantify distinct incidents per crossing and per evaluation period.
 - Determine whether duration fields can support interval-overlap labels.
@@ -267,7 +271,7 @@ reported-event claim boundary.
 
 | Phase | Status | Plan |
 |---|---|---|
-| 1. Source audit and incident deduplication | Remediation planned | [Phase 1 remediation plan](plans/01a-incident-deduplication-remediation.md) |
+| 1. Source audit and incident deduplication | Remediation implemented — awaiting manual review and repeat-run acceptance evidence | [Phase 1 remediation plan](plans/01a-incident-deduplication-remediation.md) |
 | 2. Reported-event interval, exposure, and geography construction | Not started — draft blocked by Phase 1 remediation | [Preliminary Phase 2 plan](plans/02-reported-event-interval-exposure-geography.md) |
 | 3. Configurable hotspot cohort and regional screening | Not started | To be drafted after Phase 2 |
 | 4. Pooled timing and geographic baselines | Not started | To be drafted after Phase 3 |

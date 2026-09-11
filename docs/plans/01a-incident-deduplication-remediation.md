@@ -34,10 +34,11 @@ recalculated after remediation.
    contains 39,733 rows labeled `31-60 minutes`, while the code expects
    `31 to 60 minutes`. The fallback maps every unmapped value to 15 minutes.
 2. **The exact-duplicate rule is not a full-row comparison.** It uses only
-   crossing ID, timestamp, and duration. Of 4,821 reports labeled exact
-   duplicates, 1,940 differ in at least one other original field. City and State columns
-   should also be used in addition to the three currently used.
-   Other columns can be ignored for the exact-duplicate rule.
+   crossing ID, timestamp, and duration. Expanding that key to include City and
+   State is still insufficient: compared with all 11 material fields, the
+   five-field rule would collapse 1,939 additional records in the reviewed
+   workbook. Differences in Street, County, Railroad, Reason, Immediate Impacts,
+   or Additional Comments are material and must prevent automatic consolidation.
 3. **Probable and unresolved candidates are automatically merged.** The existing
    duration-window rule, its 15-minute buffer, and chained window extensions were
    not validated before use. Tier 4 candidates are merged even though their label
@@ -163,11 +164,15 @@ bounds and status `unmapped`; it must never receive a default duration.
 
 Apply the following precedence to rows with valid crossing IDs and timestamps:
 
-1. **Exact:** all original material values match using null-aware equality, based on these
-five fields: crossing ID, timestamp, duration, City, and State.
-2. **Normalized exact:** all 5 normalized comparison values match.
+1. **Exact:** all 11 original material values match using null-aware equality.
+2. **Normalized exact:** all 11 material values match after the documented,
+   meaning-preserving normalization rules are applied.
 3. **Distinct candidate incident:** every other row remains a separate candidate
    reported incident.
+
+Matching only crossing ID, timestamp, duration, City, and State may provide
+diagnostic evidence of a possible duplicate, but it never authorizes automatic
+consolidation. A difference in any material field keeps the entries distinct.
 
 Do not auto-merge reports based on temporal proximity, categorical duration,
 reason compatibility, or a chained active window.
@@ -209,19 +214,30 @@ when it contains fewer, include all. Include blank `review_label` and
 `review_notes` fields. Permitted labels are `same_incident`, `distinct`, and
 `uncertain`.
 
+Maintain completed labels separately at
+`analysis_outputs/deduplication/review/candidate_review_labels.csv`, keyed by
+`candidate_pair_id`, so regenerating the deterministic sample does not overwrite
+manual work. Require every sampled ID exactly once, reject unknown IDs and labels,
+and record the label-file SHA-256 plus aggregate review counts in the acceptance
+evidence. The review file remains ignored row-level data.
+
 This sample is diagnostic. Review labels must not be converted into a new
 automatic merge rule during this remediation without a separate reviewed change
 to the ruleset.
 
 ## 2025 Workbook Reconciliation
 
-1. Delete the reconciliation of `blocked_crossings_2025.xlsx` with `blocked_crossings_2020through2025.xlsx` 
-and use only `blocked_crossings_2020through2025.xlsx` as the authoritative source.
+Use `blocked_crossings_2025.xlsx` only for a normalized full-row, multiplicity-aware
+reconciliation against the 2025 portion of
+`blocked_crossings_2020through2025.xlsx`. Never append reconciliation-only rows or
+treat the reconciliation workbook as an independent report source.
 
 ## Generated Artifacts
 
-Write new results under `analysis_outputs/deduplication/v2/`. Do not delete or
-overwrite the existing ignored artifacts.
+Write canonical results under `analysis_outputs/deduplication/v2/` and the second
+acceptance run under `analysis_outputs/deduplication/v2_repeat/`. Reruns may
+replace generated outputs in those ignored directories, but must not overwrite
+the separately maintained manual-review labels.
 
 Required outputs are:
 
@@ -237,9 +253,19 @@ Required outputs are:
 10. `diagnostics_by_state.csv`
 11. `diagnostics_by_crossing.csv`
 12. `diagnostics_by_reason.csv`
-13. `timestamp_granularity_by_year.csv`
-14. `phase_1_gate_report.json`
-15. `run_manifest.json`
+13. `diagnostics_by_consolidation_tier.csv`
+14. `diagnostics_by_duration_status.csv`
+15. `diagnostics_by_crossing_volume_tier.csv`
+16. `timestamp_granularity_by_year.csv`
+17. `timezone_assignment_diagnostics.csv`
+18. `local_time_diagnostics.csv`
+19. `reconciliation_summary.json`
+20. `reconciliation_discrepancies.parquet`
+21. `crossing_timezones.parquet`
+22. `phase_1_gate_report.json`
+23. `run_manifest.json`
+24. `candidate_review_summary.json`
+25. `phase_1_acceptance_report.json` after the notebook acceptance workflow runs
 
 Every authoritative source row must appear exactly once in the crosswalk, either
 with one canonical incident ID or one exception ID.
@@ -303,9 +329,10 @@ Cover at least:
 
 - Every configured duration category.
 - Both known duration aliases and an unmapped value.
-- Full-row exact duplicates.
-- Same crossing, timestamp, and duration with conflicting reason, impacts, or
-  comments remaining distinct.
+- Full-row exact duplicates matching all 11 material fields.
+- Entries matching crossing ID, timestamp, duration, City, and State but
+  differing in Street, County, Railroad, Reason, Immediate Impacts, or
+  Additional Comments remaining distinct.
 - Normalized-exact whitespace and case differences.
 - Close reports remaining distinct while entering the candidate queue.
 - Otherwise identical reports at different crossings.
@@ -327,11 +354,13 @@ uv run python -m unittest discover -s unit_tests -p "test_*.py"
 
 1. Run the CLI twice into separate ignored temporary output directories.
 2. Compare source IDs, incident IDs, crosswalk assignments, exceptions,
-   candidates, review sample, summaries, and diagnostics.
-3. Require exact equality except for explicitly nondeterministic execution
-   metadata.
-4. Compare the raw input files directly before and after each run and confirm they
-   are unchanged.
+   candidates, review sample, summaries, and diagnostics by logical table or JSON
+   equality rather than Parquet file bytes.
+3. Require equality except for execution timestamps, durations, and
+   output-directory paths, and list those exclusions in the comparison report.
+4. Compute raw-input SHA-256 values before and after the runs and confirm they are
+   unchanged. These runtime hashes prove immutability during execution; they are
+   not a permanent source allowlist.
 5. Restart the notebook kernel, run every cell in order, and save the notebook.
 6. Confirm the saved notebook contains no error outputs and every narrative count
    matches the `v2` artifacts.
@@ -347,7 +376,9 @@ Phase 1 remediation is complete only when:
 - Raw workbooks remain unchanged.
 - Every source row maps exactly once to an incident or exception.
 - Unsupported durations are never silently coerced.
-- Only full-field exact and normalized-exact rows are automatically consolidated.
+- Only rows matching all 11 material fields, either exactly or after documented
+  meaning-preserving normalization, are automatically consolidated; a difference
+  in any material field keeps entries distinct.
 - Temporal candidates remain review-only and do not affect canonical assignments.
 - The deterministic review sample has been labeled and summarized.
 - Reconciliation uses normalized full rows with multiplicity.

@@ -86,13 +86,27 @@ class IncidentDeduplicationTests(unittest.TestCase):
         self.assertEqual(incidents.loc[0, "consolidation_tier"], "normalized_exact")
 
     def test_full_row_rules_keep_conflicting_reports_distinct(self) -> None:
-        rows = [report(), report(), report(Reason="A moving train"), report(**{"Immediate Impacts": "Emergency response"})]
+        rows = [report(), report()]
         source = self.normalize(rows)
         incidents, crosswalk, exceptions = mod.consolidate_reports(source, CONFIG)
         self.assertEqual(len(exceptions), 0)
-        self.assertEqual(len(incidents), 3)
+        self.assertEqual(len(incidents), 1)
         self.assertEqual(incidents["consolidation_tier"].value_counts().to_dict()["exact"], 1)
         self.assertTrue(crosswalk["source_row_id"].is_unique)
+
+        differing_values = {
+            "Street": "Second St",
+            "County": "Other County",
+            "Railroad": "OTHER RR",
+            "Reason": "A moving train",
+            "Immediate Impacts": "Emergency response",
+            "Additional Comments": "Additional context",
+        }
+        for field, value in differing_values.items():
+            with self.subTest(field=field):
+                source = self.normalize([report(), report(**{field: value})])
+                incidents, _, _ = mod.consolidate_reports(source, CONFIG)
+                self.assertEqual(len(incidents), 2)
 
     def test_normalized_exact_merges_only_whitespace_and_case_differences(self) -> None:
         source = self.normalize([report(City=" Example ", Reason="A STATIONARY  TRAIN"), report(City="example", Reason="a stationary train")])
@@ -190,6 +204,115 @@ class IncidentDeduplicationTests(unittest.TestCase):
         second = mod.deterministic_review_sample(mod.generate_duplicate_candidates(second_incidents, source, CONFIG["proximity_bands_minutes"]))
         self.assertEqual(first["candidate_pair_id"].tolist(), second["candidate_pair_id"].tolist())
 
+    def test_review_labels_require_known_unique_allowed_values(self) -> None:
+        sample = pd.DataFrame(
+            {
+                "candidate_pair_id": ["PAIR-1", "PAIR-2"],
+                "proximity_band_minutes": [15, 30],
+                "crossing_volume_tier": ["low", "medium"],
+                "review_label": ["", ""],
+                "review_notes": ["", ""],
+            }
+        )
+        labels = pd.DataFrame(
+            {
+                "candidate_pair_id": ["PAIR-1", "PAIR-2"],
+                "review_label": ["same_incident", "distinct"],
+                "review_notes": ["same report", "different trains"],
+            }
+        )
+        merged, summary = mod.validate_review_labels(sample, labels)
+        self.assertTrue(summary["complete"])
+        self.assertEqual(summary["reviewed_rows"], 2)
+        self.assertEqual(merged["review_label"].tolist(), ["same_incident", "distinct"])
+
+        _, incomplete = mod.validate_review_labels(sample, labels.iloc[:1])
+        self.assertFalse(incomplete["complete"])
+        self.assertEqual(incomplete["unreviewed_rows"], 1)
+
+        with self.assertRaisesRegex(ValueError, "unknown"):
+            mod.validate_review_labels(sample, labels.assign(candidate_pair_id=["PAIR-1", "PAIR-X"]))
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            mod.validate_review_labels(sample, labels.assign(review_label=["same_incident", "maybe"]))
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            mod.validate_review_labels(sample, labels.assign(candidate_pair_id=["PAIR-1", "PAIR-1"]))
+
+    def test_input_hashes_detect_content_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "input.txt"
+            path.write_text("before", encoding="utf-8")
+            before = mod.hash_input_files({"input": path})
+            path.write_text("after", encoding="utf-8")
+            after = mod.hash_input_files({"input": path})
+        self.assertNotEqual(before, after)
+
+    def test_timestamp_granularity_includes_mark_percentages(self) -> None:
+        source = self.normalize(
+            [
+                report(**{"Date/Time": "2025-01-01 12:00:00"}),
+                report(**{"Date/Time": "2025-01-01 12:15:30"}),
+            ]
+        )
+        profile = mod.timestamp_granularity(source)
+        self.assertEqual(profile.loc[0, "five_minute_mark_percentage"], 100.0)
+        self.assertEqual(profile.loc[0, "fifteen_minute_mark_percentage"], 100.0)
+        self.assertEqual(profile.loc[0, "thirty_minute_mark_percentage"], 50.0)
+        self.assertEqual(profile.loc[0, "sixty_minute_mark_percentage"], 50.0)
+
+    def test_acceptance_report_requires_every_check(self) -> None:
+        waiting = mod.build_acceptance_report({"tests": True, "review": False})
+        complete = mod.build_acceptance_report({"tests": True, "review": True})
+        pending = mod.build_acceptance_report({"tests": True, "saved_notebook": None})
+        self.assertEqual(waiting["status"], "awaiting_review")
+        self.assertEqual(pending["status"], "awaiting_review")
+        self.assertEqual(complete["status"], "complete")
+
+    def test_notebook_contains_acceptance_workflow(self) -> None:
+        notebook_path = Path(__file__).resolve().parents[1] / "analysis" / "phase_1_analysis.ipynb"
+        notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+        source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
+        required_fragments = [
+            "test_command = ['uv', 'run', 'python', '-m', 'unittest'",
+            "hash_input_files",
+            "v2_repeat",
+            "compare_phase_1_outputs",
+            "candidate_review_labels.csv",
+            "acceptance_workflow_stage = 'setup'",
+            "acceptance_workflow_stage == 'diagnostics_reviewed'",
+            "crossing_timezones.parquet",
+            "timezone_assignment_diagnostics.csv",
+            "local_time_diagnostics.csv",
+            "reconciliation_summary.json",
+            "reconciliation_discrepancies.parquet",
+            "candidate_review_summary.json",
+            "write_acceptance_report",
+        ]
+        for fragment in required_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, source)
+
+    def test_logical_output_comparison_ignores_runtime_manifest_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            first, second = root / "first", root / "second"
+            first.mkdir()
+            second.mkdir()
+            pd.DataFrame({"id": [1], "value": ["same"]}).to_csv(first / "table.csv", index=False)
+            pd.DataFrame({"id": [1], "value": ["same"]}).to_csv(second / "table.csv", index=False)
+            for directory, timestamp in ((first, "first"), (second, "second")):
+                (directory / "run_manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "execution": {"timestamp_utc": timestamp, "duration_seconds": 1},
+                            "outputs": {"table": {"path": str(directory / "table.csv"), "filename": "table.csv"}},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            self.assertTrue(mod.compare_phase_1_outputs(first, second)["passed"])
+            pd.DataFrame({"id": [1], "value": ["changed"]}).to_csv(second / "table.csv", index=False)
+            self.assertFalse(mod.compare_phase_1_outputs(first, second)["passed"])
+
     def test_import_does_not_execute_pipeline(self) -> None:
         self.assertTrue(callable(mod.run_phase_1))
         self.assertEqual(mod.__name__, "incident_deduplication")
@@ -264,6 +387,7 @@ class IncidentDeduplicationTests(unittest.TestCase):
             inventory_path = root / "inventory.csv"
             config_path = root / "config.json"
             output_dir = root / "output"
+            repeat_output_dir = root / "output-repeat"
             pd.DataFrame([
                 report(),
                 report(**{"Date/Time": "2025-01-01 15:10:00", "Reason": "A moving train"}),
@@ -277,9 +401,19 @@ class IncidentDeduplicationTests(unittest.TestCase):
             result = mod.run_phase_1(
                 authoritative_path, reconciliation_path, inventory_path, config_path, output_dir
             )
+            repeat_result = mod.run_phase_1(
+                authoritative_path, reconciliation_path, inventory_path, config_path, repeat_output_dir
+            )
             self.assertTrue(result.validations["source_rows_map_once"])
+            self.assertTrue(all(result.validations.values()))
+            self.assertEqual(result.summary, repeat_result.summary)
+            self.assertTrue(mod.compare_phase_1_outputs(output_dir, repeat_output_dir)["passed"])
             self.assertEqual(result.summary["candidate_reported_incidents"], 2)
             self.assertTrue((output_dir / "crossing_timezones.parquet").exists())
+            self.assertTrue((output_dir / "candidate_review_summary.json").exists())
+            diagnostics = pd.read_csv(output_dir / "diagnostics_by_year.csv")
+            self.assertIn("collapsed_duplicate_report_count", diagnostics.columns)
+            self.assertIn("temporal_candidate_pair_count", diagnostics.columns)
             manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 manifest["inputs"]["authoritative"]["filename"], "authoritative.xlsx"

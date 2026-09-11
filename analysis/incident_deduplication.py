@@ -43,6 +43,23 @@ def stable_hash(*parts: object, length: int = 20) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:length]
 
 
+def file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    """Return a content hash used to prove an input was not changed by a run."""
+
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def hash_input_files(input_paths: dict[str, Path]) -> dict[str, str]:
+    """Hash named inputs without treating the hashes as a permanent allowlist."""
+
+    require_input_files(input_paths)
+    return {name: file_sha256(Path(path)) for name, path in sorted(input_paths.items())}
+
+
 def load_config(config_path: Path) -> dict[str, Any]:
     with config_path.open(encoding="utf-8") as handle:
         return json.load(handle)
@@ -495,6 +512,82 @@ def deterministic_review_sample(candidates: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+REVIEW_LABELS = {"same_incident", "distinct", "uncertain"}
+
+
+def review_label_template(sample: pd.DataFrame) -> pd.DataFrame:
+    """Create the stable, separately maintained manual-review input."""
+
+    if "candidate_pair_id" not in sample.columns:
+        if sample.empty:
+            return pd.DataFrame(columns=["candidate_pair_id", "review_label", "review_notes"])
+        raise ValueError("Review sample is missing candidate_pair_id.")
+    return (
+        sample[["candidate_pair_id"]]
+        .drop_duplicates()
+        .sort_values("candidate_pair_id", kind="stable")
+        .assign(review_label="", review_notes="")
+        .reset_index(drop=True)
+    )
+
+
+def validate_review_labels(
+    sample: pd.DataFrame, labels: pd.DataFrame
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Validate manual labels and merge them onto a deterministic review sample."""
+
+    required = ["candidate_pair_id", "review_label", "review_notes"]
+    _require_columns(labels, required, "candidate review labels")
+    if "candidate_pair_id" not in sample.columns:
+        if sample.empty:
+            sample = pd.DataFrame(columns=["candidate_pair_id", "review_label", "review_notes"])
+        else:
+            raise ValueError("Candidate review sample is missing candidate_pair_id.")
+    if sample["candidate_pair_id"].duplicated().any():
+        raise ValueError("Candidate review sample contains duplicate candidate_pair_id values.")
+    if labels["candidate_pair_id"].duplicated().any():
+        raise ValueError("Candidate review labels contain duplicate candidate_pair_id values.")
+
+    normalized = labels[required].copy()
+    normalized["candidate_pair_id"] = normalized["candidate_pair_id"].astype("string").str.strip()
+    normalized["review_label"] = normalized["review_label"].astype("string").fillna("").str.strip().str.lower()
+    normalized["review_notes"] = normalized["review_notes"].astype("string").fillna("")
+    sample_ids = set(sample["candidate_pair_id"].astype(str))
+    unknown_ids = sorted(set(normalized["candidate_pair_id"].astype(str)) - sample_ids)
+    if unknown_ids:
+        raise ValueError(f"Review labels contain unknown candidate_pair_id values: {unknown_ids[:5]}")
+    invalid_labels = sorted(set(normalized.loc[~normalized["review_label"].isin(REVIEW_LABELS | {""}), "review_label"]))
+    if invalid_labels:
+        raise ValueError(f"Review labels contain unsupported values: {invalid_labels}")
+
+    merged = sample.drop(columns=["review_label", "review_notes"], errors="ignore").merge(
+        normalized, on="candidate_pair_id", how="left", validate="one_to_one"
+    )
+    merged["review_label"] = merged["review_label"].fillna("")
+    merged["review_notes"] = merged["review_notes"].fillna("")
+    reviewed = merged["review_label"].isin(REVIEW_LABELS)
+    label_counts = merged.loc[reviewed, "review_label"].value_counts().sort_index()
+    by_stratum = (
+        merged.loc[reviewed]
+        .groupby(["proximity_band_minutes", "crossing_volume_tier", "review_label"], dropna=False)
+        .size()
+        .rename("count")
+        .reset_index()
+        .to_dict("records")
+        if reviewed.any()
+        else []
+    )
+    summary = {
+        "sample_rows": int(len(merged)),
+        "reviewed_rows": int(reviewed.sum()),
+        "unreviewed_rows": int((~reviewed).sum()),
+        "complete": bool(reviewed.all()),
+        "label_counts": {str(key): int(value) for key, value in label_counts.items()},
+        "by_stratum": by_stratum,
+    }
+    return merged, summary
+
+
 def reconcile_2025_workbooks(authoritative: pd.DataFrame, reconciliation: pd.DataFrame, config: dict[str, Any]) -> tuple[dict[str, Any], pd.DataFrame]:
     auth_2025 = authoritative.loc[authoritative["reported_at_utc"].dt.year.eq(2025)].copy()
     signature_column = "normalized_full_row_signature"
@@ -554,9 +647,13 @@ def timestamp_granularity(source: pd.DataFrame) -> pd.DataFrame:
                 "nonzero_seconds_count": int(seconds.ne(0).sum()),
                 "nonzero_seconds_percentage": round(float(seconds.ne(0).mean() * 100), 4),
                 "five_minute_mark_count": int(minutes.mod(5).eq(0).sum()),
+                "five_minute_mark_percentage": round(float(minutes.mod(5).eq(0).mean() * 100), 4),
                 "fifteen_minute_mark_count": int(minutes.mod(15).eq(0).sum()),
+                "fifteen_minute_mark_percentage": round(float(minutes.mod(15).eq(0).mean() * 100), 4),
                 "thirty_minute_mark_count": int(minutes.mod(30).eq(0).sum()),
+                "thirty_minute_mark_percentage": round(float(minutes.mod(30).eq(0).mean() * 100), 4),
                 "sixty_minute_mark_count": int(minutes.eq(0).sum()),
+                "sixty_minute_mark_percentage": round(float(minutes.eq(0).mean() * 100), 4),
                 "minimum_timestamp_utc": group["reported_at_utc"].min(),
                 "maximum_timestamp_utc": group["reported_at_utc"].max(),
             }
@@ -571,9 +668,13 @@ def timestamp_granularity(source: pd.DataFrame) -> pd.DataFrame:
                 "nonzero_seconds_count": 0,
                 "nonzero_seconds_percentage": 0.0,
                 "five_minute_mark_count": 0,
+                "five_minute_mark_percentage": 0.0,
                 "fifteen_minute_mark_count": 0,
+                "fifteen_minute_mark_percentage": 0.0,
                 "thirty_minute_mark_count": 0,
+                "thirty_minute_mark_percentage": 0.0,
                 "sixty_minute_mark_count": 0,
+                "sixty_minute_mark_percentage": 0.0,
                 "minimum_timestamp_utc": pd.NaT,
                 "maximum_timestamp_utc": pd.NaT,
             }
@@ -581,32 +682,204 @@ def timestamp_granularity(source: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _diagnostics(source: pd.DataFrame, incidents: pd.DataFrame, crosswalk: pd.DataFrame) -> dict[str, pd.DataFrame]:
+def _diagnostics(
+    source: pd.DataFrame,
+    incidents: pd.DataFrame,
+    crosswalk: pd.DataFrame,
+    candidates: pd.DataFrame,
+) -> dict[str, pd.DataFrame]:
+    """Build auditable counts without treating candidate pairs as merged incidents."""
+
     source_with_crosswalk = source.merge(crosswalk, on="source_row_id", how="left")
     source_with_crosswalk["year"] = source_with_crosswalk["reported_at_utc"].dt.year.astype("Int64")
-    primary = source_with_crosswalk[source_with_crosswalk["is_primary_report"].fillna(False)]
-    result = {}
+    source_with_crosswalk["collapsed_duplicate_report"] = (
+        source_with_crosswalk["canonical_incident_id"].notna()
+        & ~source_with_crosswalk["is_primary_report"].fillna(False)
+    )
+
+    incident_volume = incidents.groupby("norm_crossing_id")["canonical_incident_id"].transform("size")
+    incident_dimensions = incidents[["canonical_incident_id", "primary_source_row_id", "consolidation_tier"]].copy()
+    incident_dimensions["crossing_volume_tier"] = incident_volume.map(_volume_tier)
+    primary_columns = [
+        "source_row_id", "reported_at_utc", "State", "norm_crossing_id", "Reason",
+        "duration_normalization_status",
+    ]
+    incident_dimensions = incident_dimensions.merge(
+        source[primary_columns],
+        left_on="primary_source_row_id",
+        right_on="source_row_id",
+        how="left",
+        validate="one_to_one",
+    )
+    incident_dimensions["year"] = incident_dimensions["reported_at_utc"].dt.year.astype("Int64")
+    volume_by_crossing = incident_dimensions.drop_duplicates("norm_crossing_id").set_index("norm_crossing_id")["crossing_volume_tier"]
+    source_with_crosswalk["crossing_volume_tier"] = source_with_crosswalk["norm_crossing_id"].map(volume_by_crossing)
+
+    candidate_ids: set[str] = set()
+    endpoint_dimensions = pd.DataFrame()
+    if not candidates.empty:
+        candidate_ids = set(candidates["left_incident_id"]) | set(candidates["right_incident_id"])
+        endpoints = pd.concat(
+            [
+                candidates[["candidate_pair_id", "left_incident_id"]].rename(columns={"left_incident_id": "canonical_incident_id"}),
+                candidates[["candidate_pair_id", "right_incident_id"]].rename(columns={"right_incident_id": "canonical_incident_id"}),
+            ],
+            ignore_index=True,
+        ).drop_duplicates()
+        endpoint_dimensions = endpoints.merge(
+            incident_dimensions.drop(columns=["primary_source_row_id", "source_row_id", "reported_at_utc"]),
+            on="canonical_incident_id",
+            how="left",
+            validate="many_to_one",
+        )
+    source_with_crosswalk["temporal_candidate_incident"] = source_with_crosswalk["canonical_incident_id"].isin(candidate_ids)
+
     dimensions = {
         "year": "year",
         "state": "State",
         "crossing": "norm_crossing_id",
         "reason": "Reason",
+        "consolidation_tier": "consolidation_tier",
+        "duration_status": "duration_normalization_status",
+        "crossing_volume_tier": "crossing_volume_tier",
     }
+    result: dict[str, pd.DataFrame] = {}
     for name, column in dimensions.items():
-        all_counts = source_with_crosswalk.groupby(column, dropna=False).size().rename("source_report_count")
-        incident_counts = primary.groupby(column, dropna=False).size().rename("canonical_incident_count")
-        exception_counts = source_with_crosswalk[source_with_crosswalk["consolidation_tier"].eq("exception")].groupby(column, dropna=False).size().rename("exception_count")
-        result[f"diagnostics_by_{name}"] = pd.concat([all_counts, incident_counts, exception_counts], axis=1).fillna(0).reset_index()
-    tier = source_with_crosswalk.groupby("consolidation_tier", dropna=False).size().rename("source_report_count").reset_index()
-    result["diagnostics_by_consolidation_tier"] = tier
-    duration = source_with_crosswalk.groupby("duration_normalization_status", dropna=False).size().rename("source_report_count").reset_index()
-    result["diagnostics_by_duration_status"] = duration
+        grouped = source_with_crosswalk.groupby(column, dropna=False)
+        frame = grouped.agg(
+            source_report_count=("source_row_id", "size"),
+            candidate_reported_incident_count=("canonical_incident_id", "nunique"),
+            collapsed_duplicate_report_count=("collapsed_duplicate_report", "sum"),
+            exception_count=("exception_id", "nunique"),
+        )
+        temporal_incidents = (
+            source_with_crosswalk[source_with_crosswalk["temporal_candidate_incident"]]
+            .groupby(column, dropna=False)["canonical_incident_id"]
+            .nunique()
+            .rename("temporal_candidate_incident_count")
+        )
+        frame = frame.join(temporal_incidents, how="left")
+        if not endpoint_dimensions.empty and column in endpoint_dimensions.columns:
+            pair_counts = (
+                endpoint_dimensions.groupby(column, dropna=False)["candidate_pair_id"]
+                .nunique()
+                .rename("temporal_candidate_pair_count")
+            )
+            frame = frame.join(pair_counts, how="left")
+        else:
+            frame["temporal_candidate_pair_count"] = 0
+        count_columns = [column_name for column_name in frame.columns if column_name.endswith("_count")]
+        frame[count_columns] = frame[count_columns].fillna(0).astype(int)
+        result[f"diagnostics_by_{name}"] = frame.reset_index()
     return result
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(value, handle, indent=2, default=str)
+
+
+_ACCEPTANCE_MUTABLE_ARTIFACTS = {
+    "candidate_review_sample_labeled.csv",
+    "candidate_review_summary.json",
+    "phase_1_acceptance_report.json",
+}
+
+
+def _normalized_manifest(path: Path) -> dict[str, Any]:
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest.pop("execution", None)
+    for output in manifest.get("outputs", {}).values():
+        output.pop("path", None)
+    return manifest
+
+
+def compare_phase_1_outputs(primary_dir: Path, repeat_dir: Path) -> dict[str, Any]:
+    """Compare deterministic Phase 1 outputs by logical content, not file bytes."""
+
+    primary_dir, repeat_dir = Path(primary_dir), Path(repeat_dir)
+    primary_files = {
+        path.name for path in primary_dir.iterdir()
+        if path.is_file() and path.name not in _ACCEPTANCE_MUTABLE_ARTIFACTS
+    }
+    repeat_files = {
+        path.name for path in repeat_dir.iterdir()
+        if path.is_file() and path.name not in _ACCEPTANCE_MUTABLE_ARTIFACTS
+    }
+    mismatches: list[str] = []
+    if primary_files != repeat_files:
+        missing_primary = sorted(repeat_files - primary_files)
+        missing_repeat = sorted(primary_files - repeat_files)
+        if missing_primary:
+            mismatches.append(f"Missing from primary run: {missing_primary}")
+        if missing_repeat:
+            mismatches.append(f"Missing from repeat run: {missing_repeat}")
+
+    compared: list[str] = []
+    for name in sorted(primary_files & repeat_files):
+        left, right = primary_dir / name, repeat_dir / name
+        try:
+            if name == "run_manifest.json":
+                if _normalized_manifest(left) != _normalized_manifest(right):
+                    raise AssertionError("normalized manifests differ")
+            elif left.suffix == ".json":
+                if json.loads(left.read_text(encoding="utf-8")) != json.loads(right.read_text(encoding="utf-8")):
+                    raise AssertionError("JSON values differ")
+            elif left.suffix == ".parquet":
+                pd.testing.assert_frame_equal(pd.read_parquet(left), pd.read_parquet(right))
+            elif left.suffix == ".csv":
+                pd.testing.assert_frame_equal(pd.read_csv(left), pd.read_csv(right))
+            else:
+                if file_sha256(left) != file_sha256(right):
+                    raise AssertionError("file contents differ")
+            compared.append(name)
+        except Exception as exc:  # comparison report must retain every mismatch
+            mismatches.append(f"{name}: {exc}")
+    return {
+        "passed": not mismatches,
+        "compared_artifacts": compared,
+        "mismatch_count": len(mismatches),
+        "mismatches": mismatches,
+        "excluded_nondeterministic_manifest_fields": [
+            "execution.timestamp_utc", "execution.duration_seconds", "outputs.*.path"
+        ],
+    }
+
+
+def build_acceptance_report(
+    checks: dict[str, bool | None], evidence: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Create the machine-readable Phase 1 acceptance decision."""
+
+    failed = sorted(name for name, value in checks.items() if value is False)
+    pending = sorted(name for name, value in checks.items() if value is None)
+    passed = sorted(name for name, value in checks.items() if value is True)
+    return {
+        "status": "complete" if not failed and not pending else "awaiting_review",
+        "checks": checks,
+        "passed_checks": passed,
+        "failed_checks": failed,
+        "pending_checks": pending,
+        "evidence": evidence or {},
+    }
+
+
+def write_acceptance_report(
+    output_dir: Path,
+    checks: dict[str, bool | None],
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Write the acceptance report and synchronize the Phase 1 gate status."""
+
+    output_dir = Path(output_dir)
+    report = build_acceptance_report(checks, evidence)
+    _write_json(output_dir / "phase_1_acceptance_report.json", report)
+    gate_path = output_dir / "phase_1_gate_report.json"
+    gate = json.loads(gate_path.read_text(encoding="utf-8")) if gate_path.exists() else {}
+    gate["status"] = report["status"]
+    gate["acceptance"] = report
+    _write_json(gate_path, gate)
+    return report
 
 
 def _git_metadata(repo_root: Path) -> dict[str, str | None]:
@@ -684,14 +957,7 @@ def run_phase_1(
     print("[7/9] Sampling review cases & running 2025 reconciliation...")
     review_sample = deterministic_review_sample(candidates)
     reconciliation_summary, reconciliation_discrepancies = reconcile_2025_workbooks(authoritative, reconciliation, config)
-    diagnostics = _diagnostics(source, incidents, crosswalk)
-    diagnostics["diagnostics_by_crossing_volume_tier"] = (
-        candidates.groupby("crossing_volume_tier", dropna=False)
-        .agg(candidate_pair_count=("candidate_pair_id", "size"), candidate_group_count=("candidate_group_id", "nunique"))
-        .reset_index()
-        if not candidates.empty
-        else pd.DataFrame(columns=["crossing_volume_tier", "candidate_pair_count", "candidate_group_count"])
-    )
+    diagnostics = _diagnostics(source, incidents, crosswalk, candidates)
     granularity = timestamp_granularity(source)
 
     print("[8/9] Validating dataset integrity checks...")
@@ -699,6 +965,38 @@ def run_phase_1(
         "source_rows_map_once": len(crosswalk) == len(source) and crosswalk["source_row_id"].is_unique,
         "only_configured_auto_merge_tiers": set(incidents["consolidation_tier"].unique()).issubset(
             {"exact", "normalized_exact", "distinct_candidate"}
+        ),
+        "unsupported_duration_bounds_are_null": bool(
+            source.loc[source["duration_normalization_status"].eq("unmapped"), ["duration_lower_minutes", "duration_upper_minutes"]]
+            .isna()
+            .all()
+            .all()
+        ),
+        "all_incident_groups_share_normalized_11_field_signature": bool(
+            source.merge(crosswalk[["source_row_id", "canonical_incident_id"]], on="source_row_id")
+            .dropna(subset=["canonical_incident_id"])
+            .groupby("canonical_incident_id")["normalized_full_row_signature"]
+            .nunique()
+            .le(1)
+            .all()
+        ),
+        "candidate_pairs_reference_canonical_incidents": bool(
+            candidates.empty
+            or (
+                candidates["left_incident_id"].isin(incidents["canonical_incident_id"]).all()
+                and candidates["right_incident_id"].isin(incidents["canonical_incident_id"]).all()
+            )
+        ),
+        "diagnostics_have_required_counts": all(
+            {
+                "source_report_count",
+                "candidate_reported_incident_count",
+                "collapsed_duplicate_report_count",
+                "exception_count",
+                "temporal_candidate_incident_count",
+                "temporal_candidate_pair_count",
+            }.issubset(frame.columns)
+            for frame in diagnostics.values()
         ),
     }
     if not validations["source_rows_map_once"]:
@@ -733,6 +1031,25 @@ def run_phase_1(
             "An interval without a report can be labeled no_report_observed, not unblocked.",
         ],
         "summary": summary,
+        "validation": validations,
+        "timestamp_granularity_by_year": granularity.to_dict("records"),
+        "review_candidate_distribution": (
+            candidates.groupby(["proximity_band_minutes", "crossing_volume_tier"], dropna=False)
+            .size()
+            .rename("candidate_pair_count")
+            .reset_index()
+            .to_dict("records")
+            if not candidates.empty
+            else []
+        ),
+        "duration_normalization": {
+            str(key): int(value)
+            for key, value in source["duration_normalization_status"].value_counts(dropna=False).items()
+        },
+        "interval_resolution_decision": {
+            "status": "deferred_to_phase_2",
+            "candidate_units_hours": [1, 2, 4],
+        },
         "timezone_localization": {
             "inventory_path": str(inventory_path),
             "inventory_filename": inventory_path.name,
@@ -751,6 +1068,7 @@ def run_phase_1(
         "documented_exceptions": output_dir / "documented_exceptions.parquet",
         "duplicate_candidates": output_dir / "duplicate_candidates.parquet",
         "candidate_review_sample": output_dir / "candidate_review_sample.csv",
+        "candidate_review_summary": output_dir / "candidate_review_summary.json",
         "crossing_timezones": output_dir / "crossing_timezones.parquet",
         "inventory_profile": output_dir / "inventory_profile.json",
         "reconciliation_summary": output_dir / "reconciliation_summary.json",
@@ -768,6 +1086,10 @@ def run_phase_1(
     exceptions.to_parquet(artifact_paths["documented_exceptions"], index=False)
     candidates.to_parquet(artifact_paths["duplicate_candidates"], index=False)
     review_sample.to_csv(artifact_paths["candidate_review_sample"], index=False)
+    _, initial_review_summary = validate_review_labels(
+        review_sample, review_label_template(review_sample).iloc[0:0]
+    )
+    _write_json(artifact_paths["candidate_review_summary"], initial_review_summary)
     crossing_timezones.to_parquet(artifact_paths["crossing_timezones"], index=False)
     timezone_summary.to_csv(artifact_paths["timezone_assignment_diagnostics"], index=False)
     local_time_diagnostics.to_csv(artifact_paths["local_time_diagnostics"], index=False)
