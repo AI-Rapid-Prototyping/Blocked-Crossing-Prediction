@@ -92,6 +92,8 @@ Update `docs/plans/01a-incident-deduplication-remediation.md` so two full real-d
 
 ## Tests and Acceptance Criteria
 
+All automated tests use small synthetic fixtures, not the full source datasets.
+
 In `unit_tests/test_incident_deduplication.py`:
 
 - Compare the optimized consolidation output against a small test-only reference implementation.
@@ -103,14 +105,17 @@ In `unit_tests/test_incident_deduplication.py`:
 - Verify the two notebook switches and their precedence.
 - Retain the existing small-fixture repeatability test.
 
-Verification:
+Verification  
 
-1. Record the current 1,000-group consolidation benchmark before editing.
-2. Require at least a 10× improvement on the same fixture.
-3. Run the complete unit suite.
-4. Run one fresh real-data execution and confirm all validations pass.
-5. Rerun with checkpoint reuse and confirm execution begins at step 6.
-6. Enable optional repeatability mode once and confirm two fresh outputs compare equal.
+Small-data verification
+1. Before editing, benchmark the current implementation using the deterministic 1,000-group synthetic fixture.
+2. Benchmark the optimized implementation on the identical fixture and require at least a 10× speedup.
+3. Run the complete unit-test suite.
+The slow test-only reference implementation is used only for small-fixture correctness comparisons.
+
+Required full-data acceptance  
+4. Run one fresh Phase 1 execution using the actual authoritative, reconciliation, and Form 71 files. Require all validations to pass and record the separate enrichment and consolidation timings.
+5. Rerun the same full-data workflow with checkpoint reuse enabled. Confirm that it loads the checkpoint, begins processing at step 6, and produces logically identical final outputs.
 
 ## Boundaries
 
