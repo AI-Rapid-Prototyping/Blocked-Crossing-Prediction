@@ -23,8 +23,9 @@ import seaborn as sns
 '''
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_BLOCKED_XLSX = REPO_ROOT / "data" / "blocked_crossings_2025.xlsx"
-DEFAULT_BLOCKED_CSV = REPO_ROOT / "data" / "blocked_crossings_2025(Sheet1).csv"
+DEFAULT_BLOCKED_XLSX = REPO_ROOT / "data" / "blocked_crossings_2020through2025.xlsx"
+DEFAULT_BLOCKED_CSV = REPO_ROOT / "data" / "blocked_crossings_2020through2025.csv"
+#DEFAULT_BLOCKED_CSV = REPO_ROOT / "data" / "blocked_crossings_2025(Sheet1).csv"
 DEFAULT_INVENTORY = REPO_ROOT / "data" / "Crossing_Inventory_Data_(Form_71)_-_Current_20260707.csv"
 DEFAULT_GXAPS_DIR = REPO_ROOT / "data"
 DEFAULT_OUTPUT = REPO_ROOT / "analysis_outputs"
@@ -272,10 +273,11 @@ def main() -> None:
     inventory_with_counts = inventory.merge(blocked_counts, on="Crossing ID", how="left")
     inventory_with_counts["blocked_event_count"] = inventory_with_counts["blocked_event_count"].fillna(0).astype(int)
 
-    blocked_joined = blocked.merge(inventory, left_on=['Crossing ID', 'Year'], right_on=['Crossing ID', 'Trains Per Week Captured Year'], how='left', suffixes=('_blocked', '_inventory'))
-    blocked_joined.to_csv(output_dir / 'blocked_events_joined_to_inventory.csv', index=False)
-    
-    blocked_analysis = blocked_joined[blocked_joined["Street_inventory"].isna()==False]     
+    inventory_static = inventory.loc[:,['Crossing ID', 'Latitude', 'Longitude']]
+    blocked_joined1 = blocked.merge(inventory, left_on=['Crossing ID', 'Year'], right_on=['Crossing ID', 'Trains Per Week Captured Year'], how='left', suffixes=('_blocked', '_inventory'))
+    blocked_joined2 = blocked_joined1.merge(inventory_static, on=['Crossing ID'], how='left', suffixes=('', '_static'))
+    blocked_joined2.to_csv(output_dir / 'blocked_events_joined_to_inventory.csv', index=False)
+    blocked_analysis = blocked_joined2[blocked_joined2["Street_inventory"].isna()==False]
     blocked_analysis.to_csv(output_dir / 'blocked_events_joined_to_inventory_WithAssociatedTrainActivity.csv', index=False)
 
     blocked_inventory = inventory_with_counts[inventory_with_counts["blocked_event_count"] > 0].copy()
