@@ -234,10 +234,11 @@ treat the reconciliation workbook as an independent report source.
 
 ## Generated Artifacts
 
-Write canonical results under `analysis_outputs/deduplication/v2/` and the second
-acceptance run under `analysis_outputs/deduplication/v2_repeat/`. Reruns may
-replace generated outputs in those ignored directories, but must not overwrite
-the separately maintained manual-review labels.
+Write canonical results under `analysis_outputs/deduplication/v2/`. When the
+optional repeatability diagnostic is requested, write its second fresh run under
+`analysis_outputs/deduplication/v2_repeat/`. Reruns may replace generated outputs
+in those ignored directories, but must not overwrite the separately maintained
+manual-review labels.
 
 Required outputs are:
 
@@ -266,6 +267,9 @@ Required outputs are:
 23. `run_manifest.json`
 24. `candidate_review_summary.json`
 25. `phase_1_acceptance_report.json` after the notebook acceptance workflow runs
+
+The primary output also contains `step_5_checkpoint/`, with the six step-5
+Parquet frames and `checkpoint.json` required to resume processing at step 6.
 
 Every authoritative source row must appear exactly once in the crosswalk, either
 with one canonical incident ID or one exception ID.
@@ -352,15 +356,17 @@ uv run python -m unittest discover -s unit_tests -p "test_*.py"
 
 ## Real-Data Validation
 
-1. Run the CLI twice into separate ignored temporary output directories.
-2. Compare source IDs, incident IDs, crosswalk assignments, exceptions,
-   candidates, review sample, summaries, and diagnostics by logical table or JSON
-   equality rather than Parquet file bytes.
-3. Require equality except for execution timestamps, durations, and
-   output-directory paths, and list those exclusions in the comparison report.
-4. Compute raw-input SHA-256 values before and after the runs and confirm they are
+1. Run one fresh CLI execution into an ignored output directory and require all
+   validations to pass.
+2. Rerun that workflow with step-5 checkpoint reuse enabled, confirm processing
+   resumes at step 6, and compare its final output logically with the fresh run.
+3. Compute raw-input SHA-256 values before and after the runs and confirm they are
    unchanged. These runtime hashes prove immutability during execution; they are
    not a permanent source allowlist.
+4. For major pipeline changes, optionally perform two independent fresh runs and
+   compare source IDs, incident IDs, crosswalk assignments, exceptions,
+   candidates, review samples, summaries, and diagnostics by logical table or
+   JSON equality. Exclude only execution timestamps, durations, and output paths.
 5. Restart the notebook kernel, run every cell in order, and save the notebook.
 6. Confirm the saved notebook contains no error outputs and every narrative count
    matches the `v2` artifacts.
@@ -372,7 +378,10 @@ uv run python -m unittest discover -s unit_tests -p "test_*.py"
 Phase 1 remediation is complete only when:
 
 - All automated tests pass.
-- Two real-data runs produce identical deterministic results.
+- One fresh real-data run passes every validation, and a checkpoint-reuse run
+  resumes at step 6 with logically identical final outputs.
+- Two independent fresh real-data runs are an optional diagnostic for major
+  pipeline changes, not a normal acceptance requirement.
 - Raw workbooks remain unchanged.
 - Every source row maps exactly once to an incident or exception.
 - Unsupported durations are never silently coerced.

@@ -27,6 +27,15 @@ import numpy as np
 
 
 INVENTORY_REQUIRED_COLUMNS = ("Crossing ID", "Latitude", "Longitude", "Revision Date")
+STEP_5_CHECKPOINT_FORMAT_VERSION = 1
+STEP_5_CHECKPOINT_FILES = {
+    "source": "source.parquet",
+    "reconciliation": "reconciliation.parquet",
+    "crossing_timezones": "crossing_timezones.parquet",
+    "incidents": "incidents.parquet",
+    "crosswalk": "crosswalk.parquet",
+    "exceptions": "exceptions.parquet",
+}
 
 
 @dataclass(frozen=True)
@@ -307,70 +316,130 @@ def consolidate_reports(source: pd.DataFrame, config: dict[str, Any]) -> tuple[p
     """Consolidate only full-row exact and normalized-exact reports."""
 
     valid = source["crossing_id_status"].eq("valid") & source["timestamp_status"].eq("valid")
-    incident_rows: list[dict[str, Any]] = []
-    crosswalk_rows: list[dict[str, Any]] = []
-    exception_rows: list[dict[str, Any]] = []
-
-    for row in source.loc[~valid].sort_values("source_excel_row_number", kind="stable").itertuples(index=False):
-        reason = "invalid_crossing_id" if row.crossing_id_status != "valid" else "invalid_timestamp"
-        exception_id = f"EXC-{stable_hash(row.source_row_id, reason, length=20)}"
-        exception_rows.append(
+    invalid = source.loc[~valid].sort_values("source_excel_row_number", kind="stable")
+    if invalid.empty:
+        exceptions = pd.DataFrame()
+        exception_crosswalk = pd.DataFrame()
+    else:
+        exception_reasons = pd.Series(
+            np.where(
+                invalid["crossing_id_status"].ne("valid"),
+                "invalid_crossing_id",
+                "invalid_timestamp",
+            ),
+            index=invalid.index,
+        )
+        exception_ids = [
+            f"EXC-{stable_hash(source_row_id, reason, length=20)}"
+            for source_row_id, reason in zip(invalid["source_row_id"], exception_reasons)
+        ]
+        exceptions = pd.DataFrame(
             {
-                "exception_id": exception_id,
-                "source_row_id": row.source_row_id,
-                "exception_reason": reason,
-                "norm_crossing_id": row.norm_crossing_id,
-                "reported_at_utc": row.reported_at_utc,
+                "exception_id": exception_ids,
+                "source_row_id": invalid["source_row_id"].to_numpy(),
+                "exception_reason": exception_reasons.to_numpy(),
+                "norm_crossing_id": invalid["norm_crossing_id"].to_numpy(),
+                "reported_at_utc": invalid["reported_at_utc"].array,
             }
         )
-        crosswalk_rows.append(
+        exception_crosswalk = pd.DataFrame(
             {
-                "source_row_id": row.source_row_id,
+                "source_row_id": invalid["source_row_id"].to_numpy(),
                 "canonical_incident_id": pd.NA,
-                "exception_id": exception_id,
+                "exception_id": exception_ids,
                 "consolidation_tier": "exception",
                 "is_primary_report": False,
             }
         )
 
     candidates = source.loc[valid].sort_values("source_excel_row_number", kind="stable")
-    for normalized_signature, group in candidates.groupby("normalized_full_row_signature", sort=True, dropna=False):
-        raw_group_count = group["raw_full_row_signature"].nunique()
-        if raw_group_count > 1:
-            tier = "normalized_exact"
-        elif len(group) > 1:
-            tier = "exact"
-        else:
-            tier = "distinct_candidate"
-        source_ids = sorted(group["source_row_id"].tolist())
-        incident_id = f"INC-{stable_hash(*source_ids, length=20)}"
-        primary = group.sort_values("source_excel_row_number", kind="stable").iloc[0]
-        incident_rows.append(
+    if candidates.empty:
+        incidents = pd.DataFrame()
+        valid_crosswalk = pd.DataFrame()
+    else:
+        signature_column = "normalized_full_row_signature"
+        grouped = candidates.groupby(signature_column, sort=True, dropna=False)
+        consolidated = grouped.agg(
+            raw_group_count=("raw_full_row_signature", "nunique"),
+            report_count=("source_row_id", "size"),
+            norm_crossing_id=("norm_crossing_id", "first"),
+            earliest_reported_at_utc=("reported_at_utc", "min"),
+            latest_reported_at_utc=("reported_at_utc", "max"),
+            primary_source_row_id=("source_row_id", "first"),
+            sorted_source_row_ids=("source_row_id", lambda values: sorted(values.tolist())),
+        ).reset_index()
+        consolidated["consolidation_tier"] = np.select(
+            [
+                consolidated["raw_group_count"].gt(1),
+                consolidated["report_count"].gt(1),
+            ],
+            ["normalized_exact", "exact"],
+            default="distinct_candidate",
+        )
+        consolidated["canonical_incident_id"] = consolidated["sorted_source_row_ids"].map(
+            lambda source_ids: f"INC-{stable_hash(*source_ids, length=20)}"
+        )
+        consolidated["ruleset_version"] = config["ruleset_version"]
+        incidents = consolidated[
+            [
+                "canonical_incident_id",
+                "ruleset_version",
+                "consolidation_tier",
+                "report_count",
+                "norm_crossing_id",
+                "earliest_reported_at_utc",
+                "latest_reported_at_utc",
+                "primary_source_row_id",
+            ]
+        ].copy()
+        incidents = pd.DataFrame(
+            {column: incidents[column].tolist() for column in incidents.columns}
+        )
+
+        assignments = candidates[
+            ["source_row_id", "source_excel_row_number", signature_column]
+        ].merge(
+            consolidated[
+                [
+                    signature_column,
+                    "canonical_incident_id",
+                    "consolidation_tier",
+                    "primary_source_row_id",
+                ]
+            ],
+            on=signature_column,
+            how="left",
+            validate="many_to_one",
+        )
+        assignments = assignments.sort_values(
+            [signature_column, "source_excel_row_number"], kind="stable"
+        )
+        valid_crosswalk = assignments.assign(
+            exception_id=pd.NA,
+            is_primary_report=lambda frame: frame["source_row_id"].eq(
+                frame["primary_source_row_id"]
+            ),
+        )[
+            [
+                "source_row_id",
+                "canonical_incident_id",
+                "exception_id",
+                "consolidation_tier",
+                "is_primary_report",
+            ]
+        ]
+
+    crosswalk_parts = [frame for frame in (exception_crosswalk, valid_crosswalk) if not frame.empty]
+    if crosswalk_parts:
+        combined_crosswalk = pd.concat(crosswalk_parts, ignore_index=True)
+        crosswalk = pd.DataFrame(
             {
-                "canonical_incident_id": incident_id,
-                "ruleset_version": config["ruleset_version"],
-                "consolidation_tier": tier,
-                "report_count": len(group),
-                "norm_crossing_id": primary["norm_crossing_id"],
-                "earliest_reported_at_utc": group["reported_at_utc"].min(),
-                "latest_reported_at_utc": group["reported_at_utc"].max(),
-                "primary_source_row_id": primary["source_row_id"],
+                column: combined_crosswalk[column].tolist()
+                for column in combined_crosswalk.columns
             }
         )
-        for row in group.itertuples(index=False):
-            crosswalk_rows.append(
-                {
-                    "source_row_id": row.source_row_id,
-                    "canonical_incident_id": incident_id,
-                    "exception_id": pd.NA,
-                    "consolidation_tier": tier,
-                    "is_primary_report": row.source_row_id == primary["source_row_id"],
-                }
-            )
-
-    incidents = pd.DataFrame(incident_rows)
-    crosswalk = pd.DataFrame(crosswalk_rows)
-    exceptions = pd.DataFrame(exception_rows)
+    else:
+        crosswalk = pd.DataFrame()
     return incidents, crosswalk, exceptions
 
 
@@ -779,6 +848,116 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
         json.dump(value, handle, indent=2, default=str)
 
 
+def _write_step_5_checkpoint(
+    output_dir: Path,
+    frames: dict[str, pd.DataFrame],
+    config: dict[str, Any],
+    source_metadata: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Write a complete step-5 checkpoint, publishing its metadata last."""
+
+    checkpoint_dir = Path(output_dir) / "step_5_checkpoint"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path = checkpoint_dir / "checkpoint.json"
+    metadata_path.unlink(missing_ok=True)
+
+    frame_metadata: dict[str, dict[str, Any]] = {}
+    for name, filename in STEP_5_CHECKPOINT_FILES.items():
+        frame = frames[name]
+        frame.to_parquet(checkpoint_dir / filename, index=False)
+        frame_metadata[name] = {
+            "filename": filename,
+            "row_count": len(frame),
+            "columns": list(frame.columns),
+        }
+
+    metadata = {
+        "checkpoint_format_version": STEP_5_CHECKPOINT_FORMAT_VERSION,
+        "created_at_utc": pd.Timestamp.now(tz=timezone.utc).isoformat(),
+        "ruleset_version": config["ruleset_version"],
+        "source_files": source_metadata,
+        "frames": frame_metadata,
+    }
+    _write_json(metadata_path, metadata)
+    return metadata
+
+
+def _load_step_5_checkpoint(
+    output_dir: Path,
+    config: dict[str, Any],
+    source_paths: dict[str, Path],
+) -> tuple[dict[str, pd.DataFrame], dict[str, dict[str, Any]], dict[str, Any]]:
+    """Load and validate a complete analyst-selected step-5 checkpoint."""
+
+    checkpoint_dir = Path(output_dir) / "step_5_checkpoint"
+    required_paths = [checkpoint_dir / "checkpoint.json"] + [
+        checkpoint_dir / filename for filename in STEP_5_CHECKPOINT_FILES.values()
+    ]
+    missing = [path for path in required_paths if not path.is_file()]
+    if missing:
+        details = "\n".join(f"- {path}" for path in missing)
+        raise FileNotFoundError(f"Required step-5 checkpoint files are missing:\n{details}")
+
+    metadata_path = checkpoint_dir / "checkpoint.json"
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Step-5 checkpoint metadata is unreadable: {metadata_path}") from exc
+
+    if metadata.get("checkpoint_format_version") != STEP_5_CHECKPOINT_FORMAT_VERSION:
+        raise ValueError(
+            "Step-5 checkpoint format version mismatch: "
+            f"expected {STEP_5_CHECKPOINT_FORMAT_VERSION!r}, "
+            f"found {metadata.get('checkpoint_format_version')!r}."
+        )
+    if metadata.get("ruleset_version") != config["ruleset_version"]:
+        raise ValueError(
+            "Step-5 checkpoint ruleset version mismatch: "
+            f"expected {config['ruleset_version']!r}, "
+            f"found {metadata.get('ruleset_version')!r}."
+        )
+
+    source_metadata = metadata.get("source_files")
+    if not isinstance(source_metadata, dict):
+        raise ValueError("Step-5 checkpoint metadata is missing source_files.")
+    expected_source_names = {name: Path(path).name for name, path in source_paths.items()}
+    checkpoint_source_names = {
+        name: details.get("filename") if isinstance(details, dict) else None
+        for name, details in source_metadata.items()
+    }
+    if checkpoint_source_names != expected_source_names:
+        raise ValueError(
+            "Step-5 checkpoint source filename mismatch: "
+            f"expected {expected_source_names!r}, found {checkpoint_source_names!r}."
+        )
+
+    frame_metadata = metadata.get("frames")
+    if not isinstance(frame_metadata, dict) or set(frame_metadata) != set(STEP_5_CHECKPOINT_FILES):
+        raise ValueError("Step-5 checkpoint frame inventory is incomplete or incompatible.")
+
+    frames: dict[str, pd.DataFrame] = {}
+    for name, filename in STEP_5_CHECKPOINT_FILES.items():
+        details = frame_metadata[name]
+        if not isinstance(details, dict) or details.get("filename") != filename:
+            raise ValueError(f"Step-5 checkpoint filename mismatch for frame {name!r}.")
+        frame = pd.read_parquet(checkpoint_dir / filename)
+        expected_rows = details.get("row_count")
+        if len(frame) != expected_rows:
+            raise ValueError(
+                f"Step-5 checkpoint row-count mismatch for {name!r}: "
+                f"expected {expected_rows!r}, found {len(frame)!r}."
+            )
+        expected_columns = details.get("columns")
+        if list(frame.columns) != expected_columns:
+            raise ValueError(
+                f"Step-5 checkpoint column mismatch for {name!r}: "
+                f"expected {expected_columns!r}, found {list(frame.columns)!r}."
+            )
+        frames[name] = frame
+
+    return frames, source_metadata, metadata
+
+
 _ACCEPTANCE_MUTABLE_ARTIFACTS = {
     "candidate_review_sample_labeled.csv",
     "candidate_review_summary.json",
@@ -841,7 +1020,11 @@ def compare_phase_1_outputs(primary_dir: Path, repeat_dir: Path) -> dict[str, An
         "mismatch_count": len(mismatches),
         "mismatches": mismatches,
         "excluded_nondeterministic_manifest_fields": [
-            "execution.timestamp_utc", "execution.duration_seconds", "outputs.*.path"
+            "execution.timestamp_utc",
+            "execution.duration_seconds",
+            "execution.reused_step_5_checkpoint",
+            "execution.step_5_checkpoint_created_at_utc",
+            "outputs.*.path",
         ],
     }
 
@@ -897,6 +1080,7 @@ def run_phase_1(
     inventory_path: Path,
     config_path: Path,
     output_dir: Path,
+    reuse_step_5_checkpoint: bool = False,
 ) -> Phase1Result:
     """Run deterministic Phase 1 v2 and write its required artifacts."""
 
@@ -910,44 +1094,118 @@ def run_phase_1(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    require_input_files(
-        {
-            "authoritative workbook": authoritative_path,
-            "reconciliation workbook": reconciliation_path,
-            "Form 71 inventory": inventory_path,
-            "configuration": config_path,
-        }
-    )
+    source_paths = {
+        "authoritative": authoritative_path,
+        "reconciliation": reconciliation_path,
+        "form_71_inventory": inventory_path,
+    }
+    require_input_files({"configuration": config_path})
     config = load_config(config_path)
 
-    print("[2/9] Reading raw source data files (Excel & CSV)...")
-    t0 = time.monotonic()
-    authoritative_raw = pd.read_excel(authoritative_path, sheet_name=config["authoritative_sheet"])
-    reconciliation_raw = pd.read_excel(reconciliation_path)
-    inventory_raw = pd.read_csv(
-        inventory_path,
-        encoding="utf-8-sig",
-        low_memory=False,
-        usecols=list(INVENTORY_REQUIRED_COLUMNS),
-    )
-    print(f"      -> Loaded raw datasets in {time.monotonic() - t0:.1f}s")
+    if reuse_step_5_checkpoint:
+        print("[2-5/9] Loading and validating the step-5 checkpoint...")
+        frames, source_metadata, checkpoint_metadata = _load_step_5_checkpoint(
+            output_dir, config, source_paths
+        )
+        source = frames["source"]
+        reconciliation = frames["reconciliation"]
+        crossing_timezones = frames["crossing_timezones"]
+        incidents = frames["incidents"]
+        crosswalk = frames["crosswalk"]
+        exceptions = frames["exceptions"]
+        local_time_columns = [
+            column
+            for column in crossing_timezones.columns
+            if column not in {"norm_crossing_id"}
+        ] + [
+            "reported_at_local",
+            "utc_offset_minutes",
+            "reported_local_date",
+            "reported_local_hour",
+        ]
+        authoritative = source.drop(columns=local_time_columns)
+        print(f"      -> Loaded checkpoint created at {checkpoint_metadata['created_at_utc']}")
+        print(
+            "      -> Warning: current input contents are not automatically compared "
+            "with this checkpoint. Rebuild it after inputs, configuration, or pipeline code change."
+        )
+    else:
+        require_input_files(
+            {
+                "authoritative workbook": authoritative_path,
+                "reconciliation workbook": reconciliation_path,
+                "Form 71 inventory": inventory_path,
+            }
+        )
+        print("[2/9] Reading raw source data files (Excel & CSV)...")
+        t0 = time.monotonic()
+        authoritative_raw = pd.read_excel(
+            authoritative_path, sheet_name=config["authoritative_sheet"]
+        )
+        reconciliation_raw = pd.read_excel(reconciliation_path)
+        inventory_raw = pd.read_csv(
+            inventory_path,
+            encoding="utf-8-sig",
+            low_memory=False,
+            usecols=list(INVENTORY_REQUIRED_COLUMNS),
+        )
+        print(f"      -> Loaded raw datasets in {time.monotonic() - t0:.1f}s")
+        source_metadata = {
+            "authoritative": {
+                "filename": authoritative_path.name,
+                "row_count": len(authoritative_raw),
+                "columns": list(authoritative_raw.columns),
+            },
+            "reconciliation": {
+                "filename": reconciliation_path.name,
+                "row_count": len(reconciliation_raw),
+                "columns": list(reconciliation_raw.columns),
+            },
+            "form_71_inventory": {
+                "filename": inventory_path.name,
+                "row_count": len(inventory_raw),
+                "columns": list(inventory_raw.columns),
+            },
+        }
 
-    print("[3/9] Normalizing source data structures...")
-    authoritative = normalize_source_dataframe(
-        authoritative_raw, config, config["authoritative_sheet"], "authoritative"
-    )
-    reconciliation = normalize_source_dataframe(reconciliation_raw, config, "Sheet1", "reconciliation")
+        print("[3/9] Normalizing source data structures...")
+        authoritative = normalize_source_dataframe(
+            authoritative_raw, config, config["authoritative_sheet"], "authoritative"
+        )
+        reconciliation = normalize_source_dataframe(
+            reconciliation_raw, config, "Sheet1", "reconciliation"
+        )
 
-    print("[4/9] Resolving crossing time zones (timezonefinder)...")
-    t0 = time.monotonic()
-    crossing_timezones = build_crossing_timezones(inventory_raw, config)
-    print(f"      -> Resolved time zones in {time.monotonic() - t0:.1f}s")
+        print("[4/9] Resolving crossing time zones (timezonefinder)...")
+        t0 = time.monotonic()
+        crossing_timezones = build_crossing_timezones(inventory_raw, config)
+        print(f"      -> Resolved time zones in {time.monotonic() - t0:.1f}s")
 
-    print("[5/9] Enriching local time and consolidating incident reports...")
-    t0 = time.monotonic()
-    source = enrich_with_local_time(authoritative, crossing_timezones)
-    incidents, crosswalk, exceptions = consolidate_reports(source, config)
-    print(f"      -> Consolidated {len(source):,} source reports into {len(incidents):,} incidents in {time.monotonic() - t0:.1f}s")
+        print("[5/9] Enriching local time and consolidating incident reports...")
+        t0 = time.monotonic()
+        source = enrich_with_local_time(authoritative, crossing_timezones)
+        print(f"      -> Enriched local time in {time.monotonic() - t0:.1f}s")
+        t0 = time.monotonic()
+        incidents, crosswalk, exceptions = consolidate_reports(source, config)
+        print(
+            f"      -> Consolidated {len(source):,} source reports into "
+            f"{len(incidents):,} incidents in {time.monotonic() - t0:.1f}s"
+        )
+        t0 = time.monotonic()
+        checkpoint_metadata = _write_step_5_checkpoint(
+            output_dir,
+            {
+                "source": source,
+                "reconciliation": reconciliation,
+                "crossing_timezones": crossing_timezones,
+                "incidents": incidents,
+                "crosswalk": crosswalk,
+                "exceptions": exceptions,
+            },
+            config,
+            source_metadata,
+        )
+        print(f"      -> Wrote step-5 checkpoint in {time.monotonic() - t0:.1f}s")
 
     print("[6/9] Generating duplicate candidates...")
     t0 = time.monotonic()
@@ -1053,7 +1311,7 @@ def run_phase_1(
         "timezone_localization": {
             "inventory_path": str(inventory_path),
             "inventory_filename": inventory_path.name,
-            "inventory_rows": len(inventory_raw),
+            "inventory_rows": source_metadata["form_71_inventory"]["row_count"],
             "no_state_fallback": True,
             "unresolved_rows_remain_utc": True,
         },
@@ -1102,7 +1360,7 @@ def run_phase_1(
         artifact_paths["inventory_profile"],
         {
             "authoritative_rows": len(source),
-            "columns": list(authoritative_raw.columns),
+            "columns": source_metadata["authoritative"]["columns"],
             "duration_normalization": source["duration_normalization_status"].value_counts(dropna=False).to_dict(),
             "crossing_id_status": source["crossing_id_status"].value_counts(dropna=False).to_dict(),
             "outside_named_source_period_count": int(source["outside_named_source_period"].sum()),
@@ -1162,27 +1420,32 @@ def run_phase_1(
                 "path": str(authoritative_path),
                 "filename": authoritative_path.name,
                 "sheet": config["authoritative_sheet"],
-                "rows": len(authoritative_raw),
-                "schema": list(authoritative_raw.columns),
+                "rows": source_metadata["authoritative"]["row_count"],
+                "schema": source_metadata["authoritative"]["columns"],
             },
             "reconciliation": {
                 "path": str(reconciliation_path),
                 "filename": reconciliation_path.name,
                 "sheet": "Sheet1",
-                "rows": len(reconciliation_raw),
-                "schema": list(reconciliation_raw.columns),
+                "rows": source_metadata["reconciliation"]["row_count"],
+                "schema": source_metadata["reconciliation"]["columns"],
             },
             "form_71_inventory": {
                 "path": str(inventory_path),
                 "filename": inventory_path.name,
-                "rows": len(inventory_raw),
-                "schema": list(inventory_raw.columns),
+                "rows": source_metadata["form_71_inventory"]["row_count"],
+                "schema": source_metadata["form_71_inventory"]["columns"],
             },
             "configuration": {"path": str(config_path), "filename": config_path.name},
         },
         "environment": {"python": sys.version, "platform": platform.platform(), "timezonefinder": timezonefinder_version},
         "git": _git_metadata(config_path.parent.parent),
-        "execution": {"timestamp_utc": pd.Timestamp.now(tz=timezone.utc).isoformat(), "duration_seconds": round(time.monotonic() - started, 3)},
+        "execution": {
+            "timestamp_utc": pd.Timestamp.now(tz=timezone.utc).isoformat(),
+            "duration_seconds": round(time.monotonic() - started, 3),
+            "reused_step_5_checkpoint": reuse_step_5_checkpoint,
+            "step_5_checkpoint_created_at_utc": checkpoint_metadata["created_at_utc"],
+        },
         "outputs": manifest_outputs,
         "validation": validations,
     }
@@ -1200,8 +1463,20 @@ def main() -> None:
     parser.add_argument("--inventory", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--reuse-step-5-checkpoint",
+        action="store_true",
+        help="Resume from the validated checkpoint under OUTPUT_DIR instead of rebuilding steps 1-5.",
+    )
     args = parser.parse_args()
-    result = run_phase_1(args.authoritative, args.reconciliation, args.inventory, args.config, args.output_dir)
+    result = run_phase_1(
+        args.authoritative,
+        args.reconciliation,
+        args.inventory,
+        args.config,
+        args.output_dir,
+        reuse_step_5_checkpoint=args.reuse_step_5_checkpoint,
+    )
     print(json.dumps(result.summary, indent=2))
 
 

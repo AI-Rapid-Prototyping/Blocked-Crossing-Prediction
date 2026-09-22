@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import pandas as pd
 
@@ -48,11 +52,129 @@ def report(**overrides: object) -> dict[str, object]:
     return value
 
 
+def reference_consolidate_reports(
+    source: pd.DataFrame, config: dict[str, object]
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Small-fixture reference for the original per-group implementation."""
+
+    valid = source["crossing_id_status"].eq("valid") & source["timestamp_status"].eq("valid")
+    incident_rows: list[dict[str, object]] = []
+    crosswalk_rows: list[dict[str, object]] = []
+    exception_rows: list[dict[str, object]] = []
+    for row in source.loc[~valid].sort_values("source_excel_row_number", kind="stable").itertuples(index=False):
+        reason = "invalid_crossing_id" if row.crossing_id_status != "valid" else "invalid_timestamp"
+        exception_id = f"EXC-{mod.stable_hash(row.source_row_id, reason, length=20)}"
+        exception_rows.append(
+            {
+                "exception_id": exception_id,
+                "source_row_id": row.source_row_id,
+                "exception_reason": reason,
+                "norm_crossing_id": row.norm_crossing_id,
+                "reported_at_utc": row.reported_at_utc,
+            }
+        )
+        crosswalk_rows.append(
+            {
+                "source_row_id": row.source_row_id,
+                "canonical_incident_id": pd.NA,
+                "exception_id": exception_id,
+                "consolidation_tier": "exception",
+                "is_primary_report": False,
+            }
+        )
+
+    candidates = source.loc[valid].sort_values("source_excel_row_number", kind="stable")
+    for _, group in candidates.groupby(
+        "normalized_full_row_signature", sort=True, dropna=False
+    ):
+        raw_group_count = group["raw_full_row_signature"].nunique()
+        tier = (
+            "normalized_exact"
+            if raw_group_count > 1
+            else "exact"
+            if len(group) > 1
+            else "distinct_candidate"
+        )
+        source_ids = sorted(group["source_row_id"].tolist())
+        incident_id = f"INC-{mod.stable_hash(*source_ids, length=20)}"
+        primary = group.sort_values("source_excel_row_number", kind="stable").iloc[0]
+        incident_rows.append(
+            {
+                "canonical_incident_id": incident_id,
+                "ruleset_version": config["ruleset_version"],
+                "consolidation_tier": tier,
+                "report_count": len(group),
+                "norm_crossing_id": primary["norm_crossing_id"],
+                "earliest_reported_at_utc": group["reported_at_utc"].min(),
+                "latest_reported_at_utc": group["reported_at_utc"].max(),
+                "primary_source_row_id": primary["source_row_id"],
+            }
+        )
+        for row in group.itertuples(index=False):
+            crosswalk_rows.append(
+                {
+                    "source_row_id": row.source_row_id,
+                    "canonical_incident_id": incident_id,
+                    "exception_id": pd.NA,
+                    "consolidation_tier": tier,
+                    "is_primary_report": row.source_row_id == primary["source_row_id"],
+                }
+            )
+    return (
+        pd.DataFrame(incident_rows),
+        pd.DataFrame(crosswalk_rows),
+        pd.DataFrame(exception_rows),
+    )
+
+
 class IncidentDeduplicationTests(unittest.TestCase):
     def normalize(self, rows: list[dict[str, object]]) -> pd.DataFrame:
         return mod.normalize_source_dataframe(
             pd.DataFrame(rows), CONFIG, "Sheet1", "authoritative"
         )
+
+    def write_pipeline_inputs(self, root: Path) -> tuple[Path, Path, Path, Path]:
+        authoritative_path = root / "authoritative.xlsx"
+        reconciliation_path = root / "reconciliation.xlsx"
+        inventory_path = root / "inventory.csv"
+        config_path = root / "config.json"
+        pd.DataFrame(
+            [
+                report(),
+                report(**{"Date/Time": "2025-01-01 15:10:00", "Reason": "A moving train"}),
+            ]
+        ).to_excel(authoritative_path, index=False)
+        pd.DataFrame([report()]).to_excel(reconciliation_path, index=False)
+        pd.DataFrame(
+            [
+                {
+                    "Crossing ID": "123456A",
+                    "Latitude": None,
+                    "Longitude": None,
+                    "Revision Date": "2025-01-01",
+                }
+            ]
+        ).to_csv(inventory_path, index=False)
+        config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+        return authoritative_path, reconciliation_path, inventory_path, config_path
+
+    def test_optimized_consolidation_matches_reference_for_all_row_classes(self) -> None:
+        rows = [
+            report(**{"Crossing ID": "100001A", "Reason": "singleton"}),
+            report(**{"Crossing ID": "100002A", "Reason": "exact"}),
+            report(**{"Crossing ID": "100002A", "Reason": "exact"}),
+            report(**{"Crossing ID": "100003A", "City": " Example ", "Reason": "Normalized  Value"}),
+            report(**{"Crossing ID": "100003A", "City": "example", "Reason": "normalized value"}),
+            report(**{"Crossing ID": "bad"}),
+            report(**{"Crossing ID": "100004A", "Date/Time": "not a timestamp"}),
+        ]
+        source = self.normalize(rows)
+        for candidate in (source, source.sample(frac=1, random_state=17)):
+            with self.subTest(shuffled=not candidate.index.equals(source.index)):
+                expected = reference_consolidate_reports(candidate, CONFIG)
+                actual = mod.consolidate_reports(candidate, CONFIG)
+                for expected_frame, actual_frame in zip(expected, actual):
+                    pd.testing.assert_frame_equal(actual_frame, expected_frame)
 
     def test_duration_categories_aliases_and_unmapped_values(self) -> None:
         rows = [report(Duration=duration) for duration in CONFIG["duration_categories"]]
@@ -276,9 +398,20 @@ class IncidentDeduplicationTests(unittest.TestCase):
             "hash_input_files",
             "v2_repeat",
             "compare_phase_1_outputs",
+            "REUSE_STEP_5_CHECKPOINT = False",
+            "RUN_REPEATABILITY_CHECK = False",
+            "effective_reuse_step_5_checkpoint = REUSE_STEP_5_CHECKPOINT and not RUN_REPEATABILITY_CHECK",
+            "RUN_REPEATABILITY_CHECK takes precedence",
+            "reuse_step_5_checkpoint=effective_reuse_step_5_checkpoint",
+            "reuse_step_5_checkpoint=False",
+            "'status': 'not_run'",
+            "if RUN_REPEATABILITY_CHECK:\n    acceptance_checks['two_real_data_runs_match']",
             "candidate_review_labels.csv",
+            "if not review_labels_path.exists()",
             "acceptance_workflow_stage = 'setup'",
             "acceptance_workflow_stage == 'diagnostics_reviewed'",
+            "step_5_checkpoint",
+            "checkpoint.json",
             "crossing_timezones.parquet",
             "timezone_assignment_diagnostics.csv",
             "local_time_diagnostics.csv",
@@ -290,6 +423,20 @@ class IncidentDeduplicationTests(unittest.TestCase):
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, source)
+        for reuse_requested, repeatability_requested, expected_reuse in (
+            (False, False, False),
+            (True, False, True),
+            (False, True, False),
+            (True, True, False),
+        ):
+            with self.subTest(
+                reuse_requested=reuse_requested,
+                repeatability_requested=repeatability_requested,
+            ):
+                self.assertEqual(
+                    reuse_requested and not repeatability_requested,
+                    expected_reuse,
+                )
 
     def test_logical_output_comparison_ignores_runtime_manifest_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -334,6 +481,129 @@ class IncidentDeduplicationTests(unittest.TestCase):
             message = str(raised.exception)
             for path in input_paths.values():
                 self.assertIn(str(path), message)
+
+    def test_step_5_checkpoint_creation_loading_and_validation_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_dir = Path(temporary_directory)
+            frames = {
+                name: pd.DataFrame({f"{name}_value": [1, 2]})
+                for name in mod.STEP_5_CHECKPOINT_FILES
+            }
+            source_metadata = {
+                "authoritative": {
+                    "filename": "authoritative.xlsx",
+                    "row_count": 2,
+                    "columns": CONFIG["material_columns"],
+                },
+                "reconciliation": {
+                    "filename": "reconciliation.xlsx",
+                    "row_count": 1,
+                    "columns": CONFIG["material_columns"],
+                },
+                "form_71_inventory": {
+                    "filename": "inventory.csv",
+                    "row_count": 1,
+                    "columns": list(mod.INVENTORY_REQUIRED_COLUMNS),
+                },
+            }
+            source_paths = {
+                "authoritative": Path("authoritative.xlsx"),
+                "reconciliation": Path("reconciliation.xlsx"),
+                "form_71_inventory": Path("inventory.csv"),
+            }
+
+            metadata = mod._write_step_5_checkpoint(
+                output_dir, frames, CONFIG, source_metadata
+            )
+            checkpoint_dir = output_dir / "step_5_checkpoint"
+            self.assertTrue((checkpoint_dir / "checkpoint.json").is_file())
+            loaded, loaded_sources, loaded_metadata = mod._load_step_5_checkpoint(
+                output_dir, CONFIG, source_paths
+            )
+            self.assertEqual(loaded_sources, source_metadata)
+            self.assertEqual(loaded_metadata, metadata)
+            for name in frames:
+                pd.testing.assert_frame_equal(loaded[name], frames[name])
+
+            missing_path = checkpoint_dir / mod.STEP_5_CHECKPOINT_FILES["exceptions"]
+            missing_path.unlink()
+            with self.assertRaisesRegex(FileNotFoundError, "exceptions.parquet"):
+                mod._load_step_5_checkpoint(output_dir, CONFIG, source_paths)
+
+            def rewrite_metadata() -> dict[str, object]:
+                return mod._write_step_5_checkpoint(
+                    output_dir, frames, CONFIG, source_metadata
+                )
+
+            for field, value, message in (
+                ("ruleset_version", "incompatible", "ruleset version mismatch"),
+                ("row_count", 999, "row-count mismatch"),
+                ("columns", ["wrong_column"], "column mismatch"),
+            ):
+                with self.subTest(field=field):
+                    current = rewrite_metadata()
+                    if field == "ruleset_version":
+                        current[field] = value
+                    else:
+                        current["frames"]["source"][field] = value
+                    (checkpoint_dir / "checkpoint.json").write_text(
+                        json.dumps(current), encoding="utf-8"
+                    )
+                    with self.assertRaisesRegex(ValueError, message):
+                        mod._load_step_5_checkpoint(output_dir, CONFIG, source_paths)
+
+            rewrite_metadata()
+            with mock.patch.object(
+                pd.DataFrame,
+                "to_parquet",
+                side_effect=[None, RuntimeError("interrupted checkpoint write")],
+            ):
+                with self.assertRaisesRegex(RuntimeError, "interrupted checkpoint write"):
+                    mod._write_step_5_checkpoint(
+                        output_dir, frames, CONFIG, source_metadata
+                    )
+            self.assertFalse((checkpoint_dir / "checkpoint.json").exists())
+
+    def test_checkpoint_reuse_skips_steps_1_through_5_and_matches_fresh_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            inputs = self.write_pipeline_inputs(root)
+            fresh_output = root / "fresh"
+            reused_output = root / "reused"
+            fresh_result = mod.run_phase_1(*inputs, fresh_output)
+            shutil.copytree(
+                fresh_output / "step_5_checkpoint",
+                reused_output / "step_5_checkpoint",
+            )
+
+            skipped = (
+                mock.patch.object(mod.pd, "read_excel", side_effect=AssertionError("read_excel called")),
+                mock.patch.object(mod.pd, "read_csv", side_effect=AssertionError("read_csv called")),
+                mock.patch.object(mod, "normalize_source_dataframe", side_effect=AssertionError("normalize called")),
+                mock.patch.object(mod, "build_crossing_timezones", side_effect=AssertionError("timezone resolution called")),
+                mock.patch.object(mod, "enrich_with_local_time", side_effect=AssertionError("enrichment called")),
+                mock.patch.object(mod, "consolidate_reports", side_effect=AssertionError("consolidation called")),
+                mock.patch.object(mod, "_write_step_5_checkpoint", side_effect=AssertionError("checkpoint rewritten")),
+            )
+            stdout = io.StringIO()
+            with contextlib.ExitStack() as stack, contextlib.redirect_stdout(stdout):
+                for patcher in skipped:
+                    stack.enter_context(patcher)
+                reused_result = mod.run_phase_1(
+                    *inputs, reused_output, reuse_step_5_checkpoint=True
+                )
+
+            output = stdout.getvalue()
+            self.assertIn("Loading and validating the step-5 checkpoint", output)
+            self.assertIn("[6/9] Generating duplicate candidates", output)
+            self.assertNotIn("[2/9] Reading raw source data", output)
+            self.assertEqual(reused_result.summary, fresh_result.summary)
+            comparison = mod.compare_phase_1_outputs(fresh_output, reused_output)
+            self.assertTrue(comparison["passed"], comparison)
+            manifest = json.loads(
+                (reused_output / "run_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(manifest["execution"]["reused_step_5_checkpoint"])
 
     def test_source_ids_ignore_container_bytes(self) -> None:
         rows = [report(), report(Reason="A moving train"), report(**{"Crossing ID": "bad"})]
