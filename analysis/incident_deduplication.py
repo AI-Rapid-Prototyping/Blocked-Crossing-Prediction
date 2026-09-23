@@ -1,8 +1,9 @@
 """Auditable Phase 1 incident consolidation and crossing-local time enrichment.
 
-The pipeline deliberately consolidates only full-row exact and normalized-exact
-reports.  UTC timestamps remain the authoritative comparison timestamp; local
-time is a derived, coordinate-backed reporting field.
+The pipeline assigns every configured same-crossing comparison pair one of two
+deterministic outcomes: ``auto_merge`` or ``keep_distinct``.  Duration categories
+are proxy intervals rather than measured endpoints. UTC remains authoritative;
+local time is a derived, coordinate-backed reporting field.
 """
 
 from __future__ import annotations
@@ -232,7 +233,9 @@ def build_crossing_timezones(
     )
     # A current valid coordinate is preferred. If none exists, retain the latest
     # invalid record so affected reports are distinguished from missing inventory.
-    latest_valid = lookup[valid_coordinates].drop_duplicates("norm_crossing_id", keep="last")
+    latest_valid = lookup.loc[
+        lookup["inventory_coordinate_status"].eq("valid_coordinates")
+    ].drop_duplicates("norm_crossing_id", keep="last")
     latest_any = lookup.drop_duplicates("norm_crossing_id", keep="last")
     lookup = pd.concat(
         [latest_valid, latest_any[~latest_any["norm_crossing_id"].isin(latest_valid["norm_crossing_id"])]],
@@ -447,214 +450,350 @@ def _volume_tier(count: int) -> str:
     return "low" if count <= 3 else "medium" if count <= 19 else "high"
 
 
-def generate_duplicate_candidates(incidents: pd.DataFrame, source: pd.DataFrame, bands: list[int]) -> pd.DataFrame:
-    """Generate proximity evidence without altering canonical assignments."""
+PAIR_DECISIONS = {"auto_merge", "keep_distinct"}
+PAIR_DECISION_BASE_COLUMNS = [
+    "pair_decision_id",
+    "left_report_group_id",
+    "right_report_group_id",
+    "norm_crossing_id",
+    "separation_minutes",
+    "proximity_band_minutes",
+    "crossing_volume_tier",
+    "left_reported_at_utc",
+    "right_reported_at_utc",
+    "left_reported_at_local",
+    "right_reported_at_local",
+    "left_iana_time_zone",
+    "right_iana_time_zone",
+    "left_utc_offset_minutes",
+    "right_utc_offset_minutes",
+    "left_duration_raw",
+    "right_duration_raw",
+    "left_duration_normalized",
+    "right_duration_normalized",
+    "earlier_duration_upper_minutes",
+    "non_temporal_fields_compatible",
+    "incompatible_non_temporal_fields",
+    "pair_decision",
+    "decision_basis",
+    "uncertainty_flag",
+    "uncertainty_basis",
+]
 
+
+def _field_slug(field: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", field.casefold()).strip("_")
+
+
+def generate_pair_decisions(
+    incidents: pd.DataFrame, source: pd.DataFrame, config: dict[str, Any]
+) -> pd.DataFrame:
+    """Assign a deterministic decision to every configured temporal pair.
+
+    The comparison universe is same-crossing report groups separated by no more
+    than the largest configured decision band. Reports outside that universe are
+    distinct by construction. Duration supplies only a proxy-overlap test; it is
+    never treated as a measured endpoint.
+    """
+
+    compatibility_fields = config["non_temporal_compatibility_fields"]
+    evidence_columns = [
+        column
+        for field in compatibility_fields
+        for column in (field, f"comparison__{field}")
+    ]
+    output_columns = PAIR_DECISION_BASE_COLUMNS + [
+        f"{side}_{_field_slug(field)}"
+        for field in compatibility_fields
+        for side in ("left", "right")
+    ]
     if incidents.empty:
-        return pd.DataFrame()
-        
+        return pd.DataFrame(columns=output_columns)
+
     source = source.copy()
     for column in ("reported_at_local", "iana_time_zone", "utc_offset_minutes"):
         if column not in source.columns:
             source[column] = pd.NA
-            
-    primary_details = source.set_index("source_row_id").loc[
-        incidents["primary_source_row_id"],
-        ["Duration", "norm_duration", "Reason", "State", "City", "reported_at_local", "iana_time_zone", "utc_offset_minutes"],
-    ].reset_index().rename(columns={"source_row_id": "primary_source_row_id"})
-    
+
+    detail_columns = [
+        "Duration",
+        "norm_duration",
+        "duration_upper_minutes",
+        "reported_at_local",
+        "iana_time_zone",
+        "utc_offset_minutes",
+        *evidence_columns,
+    ]
+    primary_details = (
+        source.set_index("source_row_id")
+        .loc[incidents["primary_source_row_id"], detail_columns]
+        .reset_index()
+        .rename(columns={"source_row_id": "primary_source_row_id"})
+    )
     work = incidents.merge(primary_details, on="primary_source_row_id", how="left")
     volume = work.groupby("norm_crossing_id")["canonical_incident_id"].transform("size").astype(int)
     work["crossing_volume_tier"] = volume.map(_volume_tier)
-    
-    pairs: list[dict[str, Any]] = []
+
+    bands = sorted(config["pair_decision_bands_minutes"])
     max_band = max(bands)
-    
-    # Sort once upfront instead of per-group
-    work_sorted = work.sort_values(["norm_crossing_id", "earliest_reported_at_utc"], kind="stable")
-    
-    for crossing_id, group in work_sorted.groupby("norm_crossing_id", sort=False):
-        n = len(group)
-        if n < 2:
-            continue
-            
-        # Extract column vectors directly to avoid expensive `to_dict('records')` overhead
-        timestamps = group["earliest_reported_at_utc"].values
-        ids = group["canonical_incident_id"].values
-        reported_local = group["reported_at_local"].values
-        iana_tz = group["iana_time_zone"].values
-        utc_offset = group["utc_offset_minutes"].values
-        dur_raw = group["Duration"].values
-        dur_norm = group["norm_duration"].values
-        reasons = group["Reason"].values
-        states = group["State"].values
-        cities = group["City"].values
-        vol_tiers = group["crossing_volume_tier"].values
-        
-        for left_idx in range(n):
-            t_left = timestamps[left_idx]
-            id_left = ids[left_idx]
-            
-            for right_idx in range(left_idx + 1, n):
-                separation = (timestamps[right_idx] - t_left) / np.timedelta64(1, 'm')
-                
-                if separation > max_band:
-                    break
-                    
-                band = next(limit for limit in bands if separation <= limit)
-                id_right = ids[right_idx]
-                pair_id = f"PAIR-{stable_hash(*sorted([id_left, id_right]), length=20)}"
-                
-                pairs.append(
-                    {
-                        "candidate_pair_id": pair_id,
-                        "left_incident_id": id_left,
-                        "right_incident_id": id_right,
-                        "norm_crossing_id": crossing_id,
-                        "separation_minutes": separation,
-                        "proximity_band_minutes": band,
-                        "crossing_volume_tier": vol_tiers[left_idx],
-                        "left_reported_at_utc": t_left,
-                        "right_reported_at_utc": timestamps[right_idx],
-                        "left_reported_at_local": reported_local[left_idx],
-                        "right_reported_at_local": reported_local[right_idx],
-                        "left_iana_time_zone": iana_tz[left_idx],
-                        "right_iana_time_zone": iana_tz[right_idx],
-                        "left_utc_offset_minutes": utc_offset[left_idx],
-                        "right_utc_offset_minutes": utc_offset[right_idx],
-                        "left_duration_raw": dur_raw[left_idx],
-                        "right_duration_raw": dur_raw[right_idx],
-                        "left_duration_normalized": dur_norm[left_idx],
-                        "right_duration_normalized": dur_norm[right_idx],
-                        "left_reason": reasons[left_idx],
-                        "right_reason": reasons[right_idx],
-                        "state": states[left_idx],
-                        "city": cities[left_idx],
-                    }
-                )
-                
-    candidates = pd.DataFrame(pairs)
-    if candidates.empty:
-        return candidates
-
-    # Components are navigation aids only: they never alter canonical assignments.
-    parent: dict[str, str] = {}
-
-    def find(value: str) -> str:
-        parent.setdefault(value, value)
-        if parent[value] != value:
-            parent[value] = find(parent[value])
-        return parent[value]
-
-    def union(left: str, right: str) -> None:
-        left_root, right_root = find(left), find(right)
-        if left_root != right_root:
-            parent[max(left_root, right_root)] = min(left_root, right_root)
-
-    for pair in candidates.itertuples(index=False):
-        union(pair.left_incident_id, pair.right_incident_id)
-    members: dict[str, list[str]] = defaultdict(list)
-    for incident_id in parent:
-        members[find(incident_id)].append(incident_id)
-    group_ids = {
-        incident_id: f"CGRP-{stable_hash(*sorted(component), length=20)}"
-        for component in members.values()
-        for incident_id in component
-    }
-    candidates["candidate_group_id"] = candidates["left_incident_id"].map(group_ids)
-    return candidates.sort_values(["norm_crossing_id", "candidate_pair_id"], kind="stable").reset_index(drop=True)
-
-
-def deterministic_review_sample(candidates: pd.DataFrame) -> pd.DataFrame:
-    if candidates.empty:
-        return candidates.assign(review_label=pd.Series(dtype="string"), review_notes=pd.Series(dtype="string"))
-    sample_parts = []
-    for _, group in candidates.groupby(["proximity_band_minutes", "crossing_volume_tier"], sort=True):
-        ranked = group.assign(
-            _content_hash=group.apply(lambda row: stable_hash(*row.astype(str).tolist(), length=64), axis=1)
-        ).sort_values("_content_hash", kind="stable")
-        sample_parts.append(ranked.head(25))
-    return (
-        pd.concat(sample_parts, ignore_index=True)
-        .drop(columns="_content_hash")
-        .assign(review_label="", review_notes="")
+    pairs: list[dict[str, Any]] = []
+    work = work.sort_values(
+        ["norm_crossing_id", "earliest_reported_at_utc", "canonical_incident_id"],
+        kind="stable",
     )
 
+    for crossing_id, group in work.groupby("norm_crossing_id", sort=False):
+        timestamps = group["earliest_reported_at_utc"].tolist()
+        incident_group_ids = group["canonical_incident_id"].to_numpy()
+        volume_tiers = group["crossing_volume_tier"].to_numpy()
+        reported_local = group["reported_at_local"].to_numpy()
+        time_zones = group["iana_time_zone"].to_numpy()
+        utc_offsets = group["utc_offset_minutes"].to_numpy()
+        duration_raw = group["Duration"].to_numpy()
+        duration_normalized = group["norm_duration"].to_numpy()
+        duration_upper_values = group["duration_upper_minutes"].to_numpy()
+        raw_field_values = {
+            field: group[field].to_numpy() for field in compatibility_fields
+        }
+        comparison_values = {
+            field: group[f"comparison__{field}"].to_numpy()
+            for field in compatibility_fields
+        }
 
-REVIEW_LABELS = {"same_incident", "distinct", "uncertain"}
+        for left_index, left_timestamp in enumerate(timestamps):
+            for right_index in range(left_index + 1, len(timestamps)):
+                separation = (
+                    timestamps[right_index] - left_timestamp
+                ).total_seconds() / 60
+                if separation > max_band:
+                    break
 
+                incompatible_fields = [
+                    field
+                    for field in compatibility_fields
+                    if comparison_values[field][left_index]
+                    != comparison_values[field][right_index]
+                ]
+                non_temporal_compatible = not incompatible_fields
+                duration_upper = duration_upper_values[left_index]
+                earlier_duration = duration_normalized[left_index]
 
-def review_label_template(sample: pd.DataFrame) -> pd.DataFrame:
-    """Create the stable, separately maintained manual-review input."""
+                if pd.isna(duration_upper):
+                    pair_decision = "keep_distinct"
+                    if earlier_duration == "More than one day":
+                        decision_basis = "open_ended_duration_proxy"
+                        uncertainty_basis = "possible_temporal_overlap"
+                    else:
+                        decision_basis = "duration_proxy_unavailable"
+                        uncertainty_basis = "duration_proxy_unavailable"
+                    uncertainty_flag = True
+                elif float(duration_upper) < separation:
+                    pair_decision = "keep_distinct"
+                    decision_basis = "duration_incompatible"
+                    uncertainty_flag = False
+                    uncertainty_basis = "none"
+                elif non_temporal_compatible:
+                    pair_decision = "auto_merge"
+                    decision_basis = "overlap_proxy_and_non_temporal_match"
+                    uncertainty_flag = True
+                    uncertainty_basis = "possible_temporal_overlap"
+                else:
+                    pair_decision = "keep_distinct"
+                    decision_basis = "overlap_proxy_but_non_temporal_mismatch"
+                    uncertainty_flag = True
+                    uncertainty_basis = "possible_temporal_overlap"
 
-    if "candidate_pair_id" not in sample.columns:
-        if sample.empty:
-            return pd.DataFrame(columns=["candidate_pair_id", "review_label", "review_notes"])
-        raise ValueError("Review sample is missing candidate_pair_id.")
+                left_id = incident_group_ids[left_index]
+                right_id = incident_group_ids[right_index]
+                pair: dict[str, Any] = {
+                    "pair_decision_id": f"PAIR-{stable_hash(*sorted([left_id, right_id]), length=20)}",
+                    "left_report_group_id": left_id,
+                    "right_report_group_id": right_id,
+                    "norm_crossing_id": crossing_id,
+                    "separation_minutes": separation,
+                    "proximity_band_minutes": next(limit for limit in bands if separation <= limit),
+                    "crossing_volume_tier": volume_tiers[left_index],
+                    "left_reported_at_utc": left_timestamp,
+                    "right_reported_at_utc": timestamps[right_index],
+                    "left_reported_at_local": reported_local[left_index],
+                    "right_reported_at_local": reported_local[right_index],
+                    "left_iana_time_zone": time_zones[left_index],
+                    "right_iana_time_zone": time_zones[right_index],
+                    "left_utc_offset_minutes": utc_offsets[left_index],
+                    "right_utc_offset_minutes": utc_offsets[right_index],
+                    "left_duration_raw": duration_raw[left_index],
+                    "right_duration_raw": duration_raw[right_index],
+                    "left_duration_normalized": earlier_duration,
+                    "right_duration_normalized": duration_normalized[right_index],
+                    "earlier_duration_upper_minutes": duration_upper,
+                    "non_temporal_fields_compatible": non_temporal_compatible,
+                    "incompatible_non_temporal_fields": "|".join(incompatible_fields),
+                    "pair_decision": pair_decision,
+                    "decision_basis": decision_basis,
+                    "uncertainty_flag": uncertainty_flag,
+                    "uncertainty_basis": uncertainty_basis,
+                }
+                for field in compatibility_fields:
+                    slug = _field_slug(field)
+                    pair[f"left_{slug}"] = raw_field_values[field][left_index]
+                    pair[f"right_{slug}"] = raw_field_values[field][right_index]
+                pairs.append(pair)
+
+    if not pairs:
+        return pd.DataFrame(columns=output_columns)
     return (
-        sample[["candidate_pair_id"]]
-        .drop_duplicates()
-        .sort_values("candidate_pair_id", kind="stable")
-        .assign(review_label="", review_notes="")
+        pd.DataFrame(pairs, columns=output_columns)
+        .sort_values(["norm_crossing_id", "pair_decision_id"], kind="stable")
         .reset_index(drop=True)
     )
 
 
-def validate_review_labels(
-    sample: pd.DataFrame, labels: pd.DataFrame
-) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Validate manual labels and merge them onto a deterministic review sample."""
+def apply_pair_decisions(
+    incidents: pd.DataFrame,
+    crosswalk: pd.DataFrame,
+    source: pd.DataFrame,
+    pair_decisions: pd.DataFrame,
+    config: dict[str, Any],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Apply auto-merge decisions without allowing chained false merges."""
 
-    required = ["candidate_pair_id", "review_label", "review_notes"]
-    _require_columns(labels, required, "candidate review labels")
-    if "candidate_pair_id" not in sample.columns:
-        if sample.empty:
-            sample = pd.DataFrame(columns=["candidate_pair_id", "review_label", "review_notes"])
-        else:
-            raise ValueError("Candidate review sample is missing candidate_pair_id.")
-    if sample["candidate_pair_id"].duplicated().any():
-        raise ValueError("Candidate review sample contains duplicate candidate_pair_id values.")
-    if labels["candidate_pair_id"].duplicated().any():
-        raise ValueError("Candidate review labels contain duplicate candidate_pair_id values.")
+    if incidents.empty:
+        return incidents.copy(), crosswalk.copy(), pair_decisions.copy()
 
-    normalized = labels[required].copy()
-    normalized["candidate_pair_id"] = normalized["candidate_pair_id"].astype("string").str.strip()
-    normalized["review_label"] = normalized["review_label"].astype("string").fillna("").str.strip().str.lower()
-    normalized["review_notes"] = normalized["review_notes"].astype("string").fillna("")
-    sample_ids = set(sample["candidate_pair_id"].astype(str))
-    unknown_ids = sorted(set(normalized["candidate_pair_id"].astype(str)) - sample_ids)
-    if unknown_ids:
-        raise ValueError(f"Review labels contain unknown candidate_pair_id values: {unknown_ids[:5]}")
-    invalid_labels = sorted(set(normalized.loc[~normalized["review_label"].isin(REVIEW_LABELS | {""}), "review_label"]))
-    if invalid_labels:
-        raise ValueError(f"Review labels contain unsupported values: {invalid_labels}")
+    incident_ids = incidents["canonical_incident_id"].astype(str).tolist()
+    parent = {incident_id: incident_id for incident_id in incident_ids}
+    members = {incident_id: {incident_id} for incident_id in incident_ids}
 
-    merged = sample.drop(columns=["review_label", "review_notes"], errors="ignore").merge(
-        normalized, on="candidate_pair_id", how="left", validate="one_to_one"
-    )
-    merged["review_label"] = merged["review_label"].fillna("")
-    merged["review_notes"] = merged["review_notes"].fillna("")
-    reviewed = merged["review_label"].isin(REVIEW_LABELS)
-    label_counts = merged.loc[reviewed, "review_label"].value_counts().sort_index()
-    by_stratum = (
-        merged.loc[reviewed]
-        .groupby(["proximity_band_minutes", "crossing_volume_tier", "review_label"], dropna=False)
-        .size()
-        .rename("count")
-        .reset_index()
-        .to_dict("records")
-        if reviewed.any()
-        else []
-    )
-    summary = {
-        "sample_rows": int(len(merged)),
-        "reviewed_rows": int(reviewed.sum()),
-        "unreviewed_rows": int((~reviewed).sum()),
-        "complete": bool(reviewed.all()),
-        "label_counts": {str(key): int(value) for key, value in label_counts.items()},
-        "by_stratum": by_stratum,
+    def find(value: str) -> str:
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = parent[value]
+        return value
+
+    auto_pairs = {
+        frozenset((row.left_report_group_id, row.right_report_group_id))
+        for row in pair_decisions.loc[
+            pair_decisions["pair_decision"].eq("auto_merge")
+        ].itertuples(index=False)
     }
-    return merged, summary
+    ordered_auto = pair_decisions.loc[pair_decisions["pair_decision"].eq("auto_merge")].sort_values(
+        ["separation_minutes", "pair_decision_id"], kind="stable"
+    )
+    for row in ordered_auto.itertuples(index=False):
+        left_root = find(row.left_report_group_id)
+        right_root = find(row.right_report_group_id)
+        if left_root == right_root:
+            continue
+        if not all(
+            frozenset((left_member, right_member)) in auto_pairs
+            for left_member in members[left_root]
+            for right_member in members[right_root]
+        ):
+            continue
+        keep_root, drop_root = sorted((left_root, right_root))
+        parent[drop_root] = keep_root
+        members[keep_root] |= members.pop(drop_root)
+
+    final_members: dict[str, set[str]] = defaultdict(set)
+    for incident_id in incident_ids:
+        final_members[find(incident_id)].add(incident_id)
+
+    valid_crosswalk = crosswalk.loc[crosswalk["canonical_incident_id"].notna()].copy()
+    source_ids_by_base = (
+        valid_crosswalk.groupby("canonical_incident_id")["source_row_id"].agg(list).to_dict()
+    )
+    source_excel_rows = source.set_index("source_row_id")["source_excel_row_number"].to_dict()
+    incident_lookup = incidents.set_index("canonical_incident_id").to_dict("index")
+    final_rows: list[dict[str, Any]] = []
+    base_to_final: dict[str, str] = {}
+    final_tiers: dict[str, str] = {}
+    primary_by_final: dict[str, str] = {}
+
+    for component in sorted((sorted(values) for values in final_members.values())):
+        source_ids = sorted(
+            source_id
+            for base_id in component
+            for source_id in source_ids_by_base[base_id]
+        )
+        final_id = f"INC-{stable_hash(*source_ids, length=20)}"
+        component_incidents = [incident_lookup[base_id] for base_id in component]
+        primary_source_id = min(
+            source_ids,
+            key=lambda source_id: int(source_excel_rows[source_id]),
+        )
+        tier = (
+            "overlap_proxy_non_temporal_match"
+            if len(component) > 1
+            else str(component_incidents[0]["consolidation_tier"])
+        )
+        final_rows.append(
+            {
+                "canonical_incident_id": final_id,
+                "ruleset_version": config["ruleset_version"],
+                "consolidation_tier": tier,
+                "report_count": len(source_ids),
+                "norm_crossing_id": component_incidents[0]["norm_crossing_id"],
+                "earliest_reported_at_utc": min(
+                    row["earliest_reported_at_utc"] for row in component_incidents
+                ),
+                "latest_reported_at_utc": max(
+                    row["latest_reported_at_utc"] for row in component_incidents
+                ),
+                "primary_source_row_id": primary_source_id,
+            }
+        )
+        for base_id in component:
+            base_to_final[base_id] = final_id
+        final_tiers[final_id] = tier
+        primary_by_final[final_id] = primary_source_id
+
+    final_incidents = pd.DataFrame(final_rows, columns=incidents.columns).sort_values(
+        "canonical_incident_id", kind="stable"
+    ).reset_index(drop=True)
+    final_crosswalk = crosswalk.copy()
+    valid_mask = final_crosswalk["canonical_incident_id"].notna()
+    final_crosswalk.loc[valid_mask, "canonical_incident_id"] = final_crosswalk.loc[
+        valid_mask, "canonical_incident_id"
+    ].map(base_to_final)
+    final_crosswalk.loc[valid_mask, "consolidation_tier"] = final_crosswalk.loc[
+        valid_mask, "canonical_incident_id"
+    ].map(final_tiers)
+    expected_primary = final_crosswalk.loc[valid_mask, "canonical_incident_id"].map(
+        primary_by_final
+    )
+    final_crosswalk.loc[valid_mask, "is_primary_report"] = final_crosswalk.loc[
+        valid_mask, "source_row_id"
+    ].eq(expected_primary)
+
+    decisions = pair_decisions.copy()
+    decisions["left_final_incident_id"] = decisions["left_report_group_id"].map(base_to_final)
+    decisions["right_final_incident_id"] = decisions["right_report_group_id"].map(base_to_final)
+    rejected_auto_merge = decisions["pair_decision"].eq("auto_merge") & decisions[
+        "left_final_incident_id"
+    ].ne(decisions["right_final_incident_id"])
+    decisions.loc[rejected_auto_merge, "pair_decision"] = "keep_distinct"
+    decisions.loc[rejected_auto_merge, "decision_basis"] = "complete_link_conflict"
+    decisions.loc[rejected_auto_merge, "uncertainty_flag"] = True
+    decisions.loc[rejected_auto_merge, "uncertainty_basis"] = "possible_temporal_overlap"
+    return final_incidents, final_crosswalk, decisions
+
+
+def deterministic_decision_audit_sample(pair_decisions: pd.DataFrame) -> pd.DataFrame:
+    """Select reproducible decision examples without soliciting truth labels."""
+
+    if pair_decisions.empty:
+        return pair_decisions.copy()
+    sample_parts = []
+    for _, group in pair_decisions.groupby(
+        ["decision_basis", "crossing_volume_tier"], sort=True
+    ):
+        ranked = group.assign(
+            _content_hash=group.apply(
+                lambda row: stable_hash(*row.astype(str).tolist(), length=64), axis=1
+            )
+        ).sort_values("_content_hash", kind="stable")
+        sample_parts.append(ranked.head(25))
+    return pd.concat(sample_parts, ignore_index=True).drop(columns="_content_hash")
 
 
 def reconcile_2025_workbooks(authoritative: pd.DataFrame, reconciliation: pd.DataFrame, config: dict[str, Any]) -> tuple[dict[str, Any], pd.DataFrame]:
@@ -755,9 +894,9 @@ def _diagnostics(
     source: pd.DataFrame,
     incidents: pd.DataFrame,
     crosswalk: pd.DataFrame,
-    candidates: pd.DataFrame,
+    pair_decisions: pd.DataFrame,
 ) -> dict[str, pd.DataFrame]:
-    """Build auditable counts without treating candidate pairs as merged incidents."""
+    """Build auditable counts for final incidents and pair decisions."""
 
     source_with_crosswalk = source.merge(crosswalk, on="source_row_id", how="left")
     source_with_crosswalk["year"] = source_with_crosswalk["reported_at_utc"].dt.year.astype("Int64")
@@ -784,14 +923,20 @@ def _diagnostics(
     volume_by_crossing = incident_dimensions.drop_duplicates("norm_crossing_id").set_index("norm_crossing_id")["crossing_volume_tier"]
     source_with_crosswalk["crossing_volume_tier"] = source_with_crosswalk["norm_crossing_id"].map(volume_by_crossing)
 
-    candidate_ids: set[str] = set()
+    decision_incident_ids: set[str] = set()
     endpoint_dimensions = pd.DataFrame()
-    if not candidates.empty:
-        candidate_ids = set(candidates["left_incident_id"]) | set(candidates["right_incident_id"])
+    if not pair_decisions.empty:
+        decision_incident_ids = set(pair_decisions["left_final_incident_id"]) | set(
+            pair_decisions["right_final_incident_id"]
+        )
         endpoints = pd.concat(
             [
-                candidates[["candidate_pair_id", "left_incident_id"]].rename(columns={"left_incident_id": "canonical_incident_id"}),
-                candidates[["candidate_pair_id", "right_incident_id"]].rename(columns={"right_incident_id": "canonical_incident_id"}),
+                pair_decisions[["pair_decision_id", "left_final_incident_id", "uncertainty_flag"]].rename(
+                    columns={"left_final_incident_id": "canonical_incident_id"}
+                ),
+                pair_decisions[["pair_decision_id", "right_final_incident_id", "uncertainty_flag"]].rename(
+                    columns={"right_final_incident_id": "canonical_incident_id"}
+                ),
             ],
             ignore_index=True,
         ).drop_duplicates()
@@ -801,7 +946,9 @@ def _diagnostics(
             how="left",
             validate="many_to_one",
         )
-    source_with_crosswalk["temporal_candidate_incident"] = source_with_crosswalk["canonical_incident_id"].isin(candidate_ids)
+    source_with_crosswalk["pair_decision_incident"] = source_with_crosswalk["canonical_incident_id"].isin(
+        decision_incident_ids
+    )
 
     dimensions = {
         "year": "year",
@@ -821,22 +968,30 @@ def _diagnostics(
             collapsed_duplicate_report_count=("collapsed_duplicate_report", "sum"),
             exception_count=("exception_id", "nunique"),
         )
-        temporal_incidents = (
-            source_with_crosswalk[source_with_crosswalk["temporal_candidate_incident"]]
+        decision_incidents = (
+            source_with_crosswalk[source_with_crosswalk["pair_decision_incident"]]
             .groupby(column, dropna=False)["canonical_incident_id"]
             .nunique()
-            .rename("temporal_candidate_incident_count")
+            .rename("pair_decision_incident_count")
         )
-        frame = frame.join(temporal_incidents, how="left")
+        frame = frame.join(decision_incidents, how="left")
         if not endpoint_dimensions.empty and column in endpoint_dimensions.columns:
             pair_counts = (
-                endpoint_dimensions.groupby(column, dropna=False)["candidate_pair_id"]
+                endpoint_dimensions.groupby(column, dropna=False)["pair_decision_id"]
                 .nunique()
-                .rename("temporal_candidate_pair_count")
+                .rename("pair_decision_count")
             )
             frame = frame.join(pair_counts, how="left")
+            uncertain_pair_counts = (
+                endpoint_dimensions.loc[endpoint_dimensions["uncertainty_flag"]]
+                .groupby(column, dropna=False)["pair_decision_id"]
+                .nunique()
+                .rename("uncertain_pair_decision_count")
+            )
+            frame = frame.join(uncertain_pair_counts, how="left")
         else:
-            frame["temporal_candidate_pair_count"] = 0
+            frame["pair_decision_count"] = 0
+            frame["uncertain_pair_decision_count"] = 0
         count_columns = [column_name for column_name in frame.columns if column_name.endswith("_count")]
         frame[count_columns] = frame[count_columns].fillna(0).astype(int)
         result[f"diagnostics_by_{name}"] = frame.reset_index()
@@ -959,8 +1114,6 @@ def _load_step_5_checkpoint(
 
 
 _ACCEPTANCE_MUTABLE_ARTIFACTS = {
-    "candidate_review_sample_labeled.csv",
-    "candidate_review_summary.json",
     "phase_1_acceptance_report.json",
 }
 
@@ -1038,7 +1191,7 @@ def build_acceptance_report(
     pending = sorted(name for name, value in checks.items() if value is None)
     passed = sorted(name for name, value in checks.items() if value is True)
     return {
-        "status": "complete" if not failed and not pending else "awaiting_review",
+        "status": "complete" if not failed and not pending else "incomplete",
         "checks": checks,
         "passed_checks": passed,
         "failed_checks": failed,
@@ -1082,7 +1235,7 @@ def run_phase_1(
     output_dir: Path,
     reuse_step_5_checkpoint: bool = False,
 ) -> Phase1Result:
-    """Run deterministic Phase 1 v2 and write its required artifacts."""
+    """Run deterministic Phase 1 and write its required artifacts."""
 
     started = time.monotonic()
     
@@ -1207,22 +1360,28 @@ def run_phase_1(
         )
         print(f"      -> Wrote step-5 checkpoint in {time.monotonic() - t0:.1f}s")
 
-    print("[6/9] Generating duplicate candidates...")
+    print("[6/9] Assigning deterministic pair decisions...")
     t0 = time.monotonic()
-    candidates = generate_duplicate_candidates(incidents, source, config["proximity_bands_minutes"])
-    print(f"      -> Generated {len(candidates):,} candidate pairs in {time.monotonic() - t0:.1f}s")
+    pair_decisions = generate_pair_decisions(incidents, source, config)
+    incidents, crosswalk, pair_decisions = apply_pair_decisions(
+        incidents, crosswalk, source, pair_decisions, config
+    )
+    print(
+        f"      -> Assigned {len(pair_decisions):,} pair decisions and produced "
+        f"{len(incidents):,} incidents in {time.monotonic() - t0:.1f}s"
+    )
 
-    print("[7/9] Sampling review cases & running 2025 reconciliation...")
-    review_sample = deterministic_review_sample(candidates)
+    print("[7/9] Sampling decision-audit cases & running 2025 reconciliation...")
+    decision_audit_sample = deterministic_decision_audit_sample(pair_decisions)
     reconciliation_summary, reconciliation_discrepancies = reconcile_2025_workbooks(authoritative, reconciliation, config)
-    diagnostics = _diagnostics(source, incidents, crosswalk, candidates)
+    diagnostics = _diagnostics(source, incidents, crosswalk, pair_decisions)
     granularity = timestamp_granularity(source)
 
     print("[8/9] Validating dataset integrity checks...")
     validations = {
         "source_rows_map_once": len(crosswalk) == len(source) and crosswalk["source_row_id"].is_unique,
         "only_configured_auto_merge_tiers": set(incidents["consolidation_tier"].unique()).issubset(
-            {"exact", "normalized_exact", "distinct_candidate"}
+            set(config["auto_merge_tiers"]) | {"distinct_candidate"}
         ),
         "unsupported_duration_bounds_are_null": bool(
             source.loc[source["duration_normalization_status"].eq("unmapped"), ["duration_lower_minutes", "duration_upper_minutes"]]
@@ -1230,19 +1389,35 @@ def run_phase_1(
             .all()
             .all()
         ),
-        "all_incident_groups_share_normalized_11_field_signature": bool(
-            source.merge(crosswalk[["source_row_id", "canonical_incident_id"]], on="source_row_id")
-            .dropna(subset=["canonical_incident_id"])
-            .groupby("canonical_incident_id")["normalized_full_row_signature"]
-            .nunique()
-            .le(1)
+        "all_pair_rows_have_one_of_two_decisions": bool(
+            pair_decisions["pair_decision"].isin(PAIR_DECISIONS).all()
+            and pair_decisions["pair_decision"].notna().all()
+        ),
+        "keep_distinct_pairs_remain_distinct": bool(
+            pair_decisions.empty
+            or pair_decisions.loc[pair_decisions["pair_decision"].eq("keep_distinct")]
+            .eval("left_final_incident_id != right_final_incident_id")
             .all()
         ),
-        "candidate_pairs_reference_canonical_incidents": bool(
-            candidates.empty
+        "auto_merge_pairs_are_coalesced": bool(
+            pair_decisions.empty
+            or pair_decisions.loc[pair_decisions["pair_decision"].eq("auto_merge")]
+            .eval("left_final_incident_id == right_final_incident_id")
+            .all()
+        ),
+        "applied_auto_merges_are_pairwise_compatible": bool(
+            pair_decisions.empty
+            or pair_decisions.loc[
+                pair_decisions["left_final_incident_id"].eq(pair_decisions["right_final_incident_id"])
+            ]["pair_decision"]
+            .eq("auto_merge")
+            .all()
+        ),
+        "pair_decisions_reference_final_incidents": bool(
+            pair_decisions.empty
             or (
-                candidates["left_incident_id"].isin(incidents["canonical_incident_id"]).all()
-                and candidates["right_incident_id"].isin(incidents["canonical_incident_id"]).all()
+                pair_decisions["left_final_incident_id"].isin(incidents["canonical_incident_id"]).all()
+                and pair_decisions["right_final_incident_id"].isin(incidents["canonical_incident_id"]).all()
             )
         ),
         "diagnostics_have_required_counts": all(
@@ -1251,13 +1426,14 @@ def run_phase_1(
                 "candidate_reported_incident_count",
                 "collapsed_duplicate_report_count",
                 "exception_count",
-                "temporal_candidate_incident_count",
-                "temporal_candidate_pair_count",
+                "pair_decision_incident_count",
+                "pair_decision_count",
+                "uncertain_pair_decision_count",
             }.issubset(frame.columns)
             for frame in diagnostics.values()
         ),
     }
-    if not validations["source_rows_map_once"]:
+    if not all(validations.values()):
         raise AssertionError(f"Phase 1 validation failed: {validations}")
 
     timezone_summary = source["timezone_assignment_status"].value_counts(dropna=False).rename_axis("timezone_assignment_status").reset_index(name="source_report_count")
@@ -1275,29 +1451,41 @@ def run_phase_1(
         "exceptions": len(exceptions),
         "auto_merged_reports": int(len(source) - len(incidents) - len(exceptions)),
         "consolidation_tiers": {key: int(value) for key, value in incidents["consolidation_tier"].value_counts().items()},
-        "temporal_candidate_pairs": len(candidates),
-        "review_sample_rows": len(review_sample),
+        "pair_decisions": len(pair_decisions),
+        "pair_decision_counts": {
+            str(key): int(value)
+            for key, value in pair_decisions["pair_decision"].value_counts().items()
+        },
+        "decision_basis_counts": {
+            str(key): int(value)
+            for key, value in pair_decisions["decision_basis"].value_counts().items()
+        },
+        "uncertain_pair_decisions": int(pair_decisions["uncertainty_flag"].sum()),
+        "decision_audit_sample_rows": len(decision_audit_sample),
         "timezone_assignment": {str(row.timezone_assignment_status): int(row.source_report_count) for row in timezone_summary.itertuples(index=False)},
     }
     gate = {
-        "status": "awaiting_review",
+        "status": "complete",
         "claim_boundary": [
             "Date/Time is a user-entered reported incident date and time supplied as UTC for this pipeline.",
             "Crossing-local time is derived from current Form 71 coordinates and historical IANA offsets.",
             "Available evidence does not prove submission time, exact physical start time, or second-accurate observation time.",
-            "Duration is a user-selected category, not a verified incident endpoint.",
+            "Duration is a documented proxy interval, not a measured or verified incident endpoint.",
+            "Pair decisions are deterministic ruleset outputs, not manual labels or ground truth about physical events.",
             "An interval without a report can be labeled no_report_observed, not unblocked.",
         ],
         "summary": summary,
         "validation": validations,
         "timestamp_granularity_by_year": granularity.to_dict("records"),
-        "review_candidate_distribution": (
-            candidates.groupby(["proximity_band_minutes", "crossing_volume_tier"], dropna=False)
+        "pair_decision_distribution": (
+            pair_decisions.groupby(
+                ["pair_decision", "decision_basis", "uncertainty_basis"], dropna=False
+            )
             .size()
-            .rename("candidate_pair_count")
+            .rename("pair_count")
             .reset_index()
             .to_dict("records")
-            if not candidates.empty
+            if not pair_decisions.empty
             else []
         ),
         "duration_normalization": {
@@ -1324,9 +1512,9 @@ def run_phase_1(
         "reported_incidents": output_dir / "reported_incidents.parquet",
         "report_incident_crosswalk": output_dir / "report_incident_crosswalk.parquet",
         "documented_exceptions": output_dir / "documented_exceptions.parquet",
-        "duplicate_candidates": output_dir / "duplicate_candidates.parquet",
-        "candidate_review_sample": output_dir / "candidate_review_sample.csv",
-        "candidate_review_summary": output_dir / "candidate_review_summary.json",
+        "pair_decisions": output_dir / "pair_decisions.parquet",
+        "pair_decision_audit_sample": output_dir / "pair_decision_audit_sample.csv",
+        "pair_decision_summary": output_dir / "pair_decision_summary.json",
         "crossing_timezones": output_dir / "crossing_timezones.parquet",
         "inventory_profile": output_dir / "inventory_profile.json",
         "reconciliation_summary": output_dir / "reconciliation_summary.json",
@@ -1342,12 +1530,22 @@ def run_phase_1(
     incidents.to_parquet(artifact_paths["reported_incidents"], index=False)
     crosswalk.to_parquet(artifact_paths["report_incident_crosswalk"], index=False)
     exceptions.to_parquet(artifact_paths["documented_exceptions"], index=False)
-    candidates.to_parquet(artifact_paths["duplicate_candidates"], index=False)
-    review_sample.to_csv(artifact_paths["candidate_review_sample"], index=False)
-    _, initial_review_summary = validate_review_labels(
-        review_sample, review_label_template(review_sample).iloc[0:0]
+    pair_decisions.to_parquet(artifact_paths["pair_decisions"], index=False)
+    decision_audit_sample.to_csv(artifact_paths["pair_decision_audit_sample"], index=False)
+    _write_json(
+        artifact_paths["pair_decision_summary"],
+        {
+            "pair_count": len(pair_decisions),
+            "decision_counts": summary["pair_decision_counts"],
+            "decision_basis_counts": summary["decision_basis_counts"],
+            "uncertainty_counts": {
+                str(key): int(value)
+                for key, value in pair_decisions["uncertainty_basis"].value_counts().items()
+            },
+            "audit_sample_rows": len(decision_audit_sample),
+            "manual_labels_used": False,
+        },
     )
-    _write_json(artifact_paths["candidate_review_summary"], initial_review_summary)
     crossing_timezones.to_parquet(artifact_paths["crossing_timezones"], index=False)
     timezone_summary.to_csv(artifact_paths["timezone_assignment_diagnostics"], index=False)
     local_time_diagnostics.to_csv(artifact_paths["local_time_diagnostics"], index=False)
@@ -1381,8 +1579,8 @@ def run_phase_1(
         "reported_incidents": len(incidents),
         "report_incident_crosswalk": len(crosswalk),
         "documented_exceptions": len(exceptions),
-        "duplicate_candidates": len(candidates),
-        "candidate_review_sample": len(review_sample),
+        "pair_decisions": len(pair_decisions),
+        "pair_decision_audit_sample": len(decision_audit_sample),
         "crossing_timezones": len(crossing_timezones),
         "reconciliation_discrepancies": len(reconciliation_discrepancies),
         "timestamp_granularity_by_year": len(granularity),
@@ -1395,8 +1593,8 @@ def run_phase_1(
         "reported_incidents": list(incidents.columns),
         "report_incident_crosswalk": list(crosswalk.columns),
         "documented_exceptions": list(exceptions.columns),
-        "duplicate_candidates": list(candidates.columns),
-        "candidate_review_sample": list(review_sample.columns),
+        "pair_decisions": list(pair_decisions.columns),
+        "pair_decision_audit_sample": list(decision_audit_sample.columns),
         "crossing_timezones": list(crossing_timezones.columns),
         "reconciliation_discrepancies": list(reconciliation_discrepancies.columns),
         "timestamp_granularity_by_year": list(granularity.columns),
@@ -1457,7 +1655,7 @@ def run_phase_1(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run Phase 1 v2 incident deduplication.")
+    parser = argparse.ArgumentParser(description="Run deterministic Phase 1 incident deduplication.")
     parser.add_argument("--authoritative", type=Path, required=True)
     parser.add_argument("--reconciliation", type=Path, required=True)
     parser.add_argument("--inventory", type=Path, required=True)

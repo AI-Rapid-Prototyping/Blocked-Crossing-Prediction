@@ -6,7 +6,7 @@
 
 This is the canonical preliminary Phase 2 plan, but it is not active and does
 not authorize implementation. The active implementation plan remains
-[Phase 1 Remediation: Auditable Incident Deduplication](01a-incident-deduplication-remediation.md).
+[Phase 1 Amendment: Deterministic Two-Outcome Pair Decisions](01b-incident-deduplication-two-outcome-policy.md).
 
 Phase 2 may become active only after Phase 1 remediation passes, every blocking
 placeholder in this document is resolved, the team reviews the completed plan,
@@ -63,31 +63,32 @@ phases will refer to future observed reports under the available reporting
 process, not calibrated probabilities of actual blockage.
 
 Duration-overlap results are sensitivity outputs, not additional independent
-reported incidents. Temporal duplicate candidates and documented exceptions must
-remain visible in uncertainty diagnostics.
+reported incidents. Deterministic pair decisions, their uncertainty fields, and
+documented exceptions must remain visible in uncertainty diagnostics.
 
 ## Activation Prerequisites
 
 Before this plan can be finalized or activated:
 
-1. Every acceptance criterion in the Phase 1 remediation plan must pass.
-2. The deterministic Phase 1 review sample must be labeled and summarized.
+1. Every acceptance criterion in the Phase 1 two-outcome amendment must pass.
+2. Every configured pair must have a deterministic decision and summarized
+   uncertainty evidence; no manual label is required.
 3. `phase_1_gate_report.json` must contain the evidence required for the
    interval-resolution and uncertainty analyses.
 4. The accepted Phase 1 ruleset, run manifest, artifact schemas and row counts,
-   and remaining candidate or exception counts must be recorded in this plan.
+   and remaining keep-distinct or exception counts must be recorded in this plan.
 5. Every blocking placeholder below must be resolved without guessing.
 
 ### Required Phase 1 inputs
 
-The accepted Phase 1 run under `analysis_outputs/deduplication/v2/` must provide:
+The accepted Phase 1 run under `analysis_outputs/deduplication/v3/` must provide:
 
 1. `source_reports_with_ids.parquet`
 2. `reported_incidents.parquet`
 3. `report_incident_crosswalk.parquet`
 4. `documented_exceptions.parquet`
-5. `duplicate_candidates.parquet`
-6. `candidate_review_sample.csv`
+5. `pair_decisions.parquet`
+6. `pair_decision_summary.json`
 7. `inventory_profile.json`
 8. `deduplication_summary.json`
 9. `diagnostics_by_year.csv`
@@ -116,13 +117,13 @@ research. They are deliberately unresolved in this preliminary plan.
 
 | ID | Blocking decision | Required evidence | Current status |
 |---|---|---|---|
-| BP-01 | Accepted Phase 1 run and ruleset | Passing gate report, manifest, artifact schemas and row counts, crosswalk integrity, and labeled review summary | **Unresolved — Phase 1 remediation pending** |
+| BP-01 | Accepted Phase 1 run and ruleset | Passing gate report, manifest, artifact schemas and row counts, crosswalk integrity, and pair-decision summary | **Unresolved — Phase 1 validation pending** |
 | BP-02 | Demonstrated source-coverage periods | Source-system evidence and Phase 1 date diagnostics sufficient to distinguish covered from unknown periods | **Unresolved — do not generate `no_report_observed` labels** |
 | BP-03 | Timestamp semantics and local-time presentation policy | Phase 1 timestamp profile and source documentation; any required geographic time-zone mapping and daylight-saving-time presentation policy | **Partially resolved — source timestamps are UTC, based on an electronic communication from the FRA data owner dated September 1, 2026; do not assume exact event start** |
 | BP-04 | Selected prediction interval | One-, two-, and four-hour comparison using accepted incidents, coverage, uncertainty, and table-size diagnostics | **Unresolved — hourly is not pre-approved** |
-| BP-05 | Adjacent-interval uncertainty treatment | Point-label, duration-overlap, timestamp-boundary, candidate-group, and exception sensitivity results | **Unresolved — preserve separate outputs** |
+| BP-05 | Adjacent-interval uncertainty treatment | Point-label, duration-overlap, timestamp-boundary, pair-decision, and exception sensitivity results | **Unresolved — preserve separate outputs** |
 | BP-06 | Full exposure or weighted training sample | Filtered exposure size, sparsity, inclusion probabilities, computational profile, and fidelity checks | **Unresolved — future evaluation remains unsampled** |
-| BP-07 | Remaining duplicate-candidate and exception effect | Accepted candidate-review results and comparison of canonical versus uncertainty-sensitive counts | **Unresolved — do not silently merge or discard** |
+| BP-07 | Keep-distinct and exception effect | Accepted pair-decision results and comparison of canonical versus uncertainty-sensitive counts | **Unresolved — retain decisions and uncertainty evidence** |
 | BP-08 | H-GAC boundary or membership source | Authoritative provider, exact version or effective date, usage terms, assignment method, and coverage QA | **Unresolved — H-GAC is a candidate only** |
 
 ## Proposed Implementation Structure
@@ -144,7 +145,7 @@ The proposed command-line shape is:
 
 ```powershell
 python analysis/reported_event_exposure.py `
-  --phase-1-dir analysis_outputs/deduplication/v2 `
+  --phase-1-dir analysis_outputs/deduplication/v3 `
   --config analysis/reported_event_exposure_config.json `
   --output-dir analysis_outputs/reported_event_exposure/v1
 ```
@@ -252,7 +253,7 @@ The filtered exposure table must contain, at minimum:
 - `point_label`
 - `canonical_incident_count`
 - `has_duration_overlap_sensitivity`
-- `has_temporal_candidate_uncertainty`
+- `has_pair_decision_uncertainty`
 - `has_exception_uncertainty`
 
 `point_label` must contain only `report_observed`, `no_report_observed`, or
@@ -341,7 +342,7 @@ same requested scope. For each unit, report:
 - Distinct incidents and intervals containing multiple incidents.
 - Incidents near interval boundaries.
 - Point-label and duration-overlap differences.
-- Temporal-candidate and exception sensitivity.
+- Pair-decision and exception sensitivity.
 - Counts by year, geography, crossing, and crossing-volume tier.
 - Estimated full-exposure rows, storage, memory, and generation time.
 
@@ -355,7 +356,7 @@ Create primary point-report labels from canonical incidents and coverage-aware
 `no_report_observed` or `unknown` labels. Preserve multiple-incident counts and
 lineage.
 
-Create duration-overlap, temporal-candidate, and exception sensitivity outputs
+Create duration-overlap, pair-decision, and exception sensitivity outputs
 separately. Compare them with the primary labels and document which adjacent
 intervals remain uncertain. Do not silently overwrite primary labels.
 
@@ -417,8 +418,8 @@ Synthetic tests must cover at least:
 - Covered intervals with no report receiving `no_report_observed`.
 - Uncovered or ambiguous intervals receiving `unknown`.
 - Point-report labels remaining separate from duration-overlap sensitivity.
-- Temporal candidates and documented exceptions appearing in uncertainty
-  diagnostics without changing canonical assignments.
+- Pair-decision uncertainty and documented exceptions appearing in uncertainty
+  diagnostics without being treated as verified physical-event truth.
 - Missing, invalid, and ambiguous crossing IDs and coordinates.
 - Many-to-many region membership and crossings on region boundaries.
 - Unmatched crossings remaining visible in diagnostics.

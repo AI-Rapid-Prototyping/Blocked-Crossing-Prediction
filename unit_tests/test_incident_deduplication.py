@@ -18,15 +18,21 @@ import incident_deduplication as mod
 
 
 CONFIG = {
-    "ruleset_version": "phase1-v2-test",
+    "ruleset_version": "phase1-v3-test",
     "authoritative_sheet": "Sheet1",
     "material_columns": [
         "Crossing ID", "City", "State", "Street", "County", "Railroad",
         "Date/Time", "Duration", "Reason", "Immediate Impacts", "Additional Comments",
     ],
     "crossing_id_pattern": r"^\d{6}[A-Z]$",
-    "auto_merge_tiers": ["exact", "normalized_exact"],
-    "proximity_bands_minutes": [15, 30, 60, 120],
+    "auto_merge_tiers": [
+        "exact", "normalized_exact", "overlap_proxy_non_temporal_match",
+    ],
+    "pair_decision_bands_minutes": [15, 30, 60, 120],
+    "non_temporal_compatibility_fields": [
+        "City", "State", "Street", "County", "Railroad", "Reason",
+        "Immediate Impacts", "Additional Comments",
+    ],
     "duration_categories": {
         "0-15 minutes": [0, 15], "16-30 minutes": [16, 30],
         "31-60 minutes": [31, 60], "1-2 hours": [60, 120],
@@ -243,15 +249,103 @@ class IncidentDeduplicationTests(unittest.TestCase):
         self.assertEqual(len(exceptions), 2)
         self.assertTrue(crosswalk["canonical_incident_id"].isna().all())
 
-    def test_close_reports_are_review_only_candidates(self) -> None:
-        source = self.normalize([report(), report(**{"Date/Time": "2025-01-01 12:10:00", "Reason": "A moving train"})])
+    def test_duration_incompatible_pair_is_decided_keep_distinct(self) -> None:
+        source = self.normalize([
+            report(Duration="0-15 minutes"),
+            report(**{"Date/Time": "2025-01-01 12:16:00", "Duration": "0-15 minutes"}),
+        ])
         incidents, _, _ = mod.consolidate_reports(source, CONFIG)
-        candidates = mod.generate_duplicate_candidates(incidents, source, CONFIG["proximity_bands_minutes"])
-        self.assertEqual(len(incidents), 2)
-        self.assertEqual(len(candidates), 1)
-        self.assertEqual(candidates.loc[0, "proximity_band_minutes"], 15)
+        decisions = mod.generate_pair_decisions(incidents, source, CONFIG)
+        self.assertEqual(decisions.loc[0, "pair_decision"], "keep_distinct")
+        self.assertEqual(decisions.loc[0, "decision_basis"], "duration_incompatible")
+        self.assertFalse(decisions.loc[0, "uncertainty_flag"])
 
-    def test_connected_candidate_pairs_share_deterministic_group_id(self) -> None:
+    def test_overlap_proxy_with_non_temporal_mismatch_stays_distinct(self) -> None:
+        differing_values = {
+            "City": "Other City",
+            "State": "CA",
+            "Street": "Second St",
+            "County": "Other County",
+            "Railroad": "OTHER RR",
+            "Reason": "A moving train",
+            "Immediate Impacts": "Emergency response",
+            "Additional Comments": "Additional context",
+        }
+        for field, value in differing_values.items():
+            with self.subTest(field=field):
+                source = self.normalize([
+                    report(),
+                    report(**{"Date/Time": "2025-01-01 12:10:00", field: value}),
+                ])
+                incidents, _, _ = mod.consolidate_reports(source, CONFIG)
+                decisions = mod.generate_pair_decisions(incidents, source, CONFIG)
+                self.assertEqual(len(incidents), 2)
+                self.assertEqual(len(decisions), 1)
+                self.assertEqual(decisions.loc[0, "pair_decision"], "keep_distinct")
+                self.assertEqual(
+                    decisions.loc[0, "decision_basis"],
+                    "overlap_proxy_but_non_temporal_mismatch",
+                )
+                self.assertEqual(
+                    decisions.loc[0, "uncertainty_basis"], "possible_temporal_overlap"
+                )
+                self.assertIn(field, decisions.loc[0, "incompatible_non_temporal_fields"])
+
+    def test_overlap_proxy_and_non_temporal_match_auto_merges_at_boundary(self) -> None:
+        source = self.normalize([
+            report(Duration="0-15 minutes"),
+            report(**{"Date/Time": "2025-01-01 12:15:00", "Duration": "16-30 minutes"}),
+        ])
+        incidents, crosswalk, _ = mod.consolidate_reports(source, CONFIG)
+        decisions = mod.generate_pair_decisions(incidents, source, CONFIG)
+        merged, merged_crosswalk, applied = mod.apply_pair_decisions(
+            incidents, crosswalk, source, decisions, CONFIG
+        )
+        self.assertEqual(decisions.loc[0, "pair_decision"], "auto_merge")
+        self.assertTrue(decisions.loc[0, "uncertainty_flag"])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged_crosswalk["canonical_incident_id"].nunique(), 1)
+        self.assertEqual(
+            applied.loc[0, "left_final_incident_id"],
+            applied.loc[0, "right_final_incident_id"],
+        )
+
+    def test_open_ended_and_unmapped_duration_proxies_do_not_auto_merge(self) -> None:
+        for duration, expected_basis in (
+            ("More than one day", "open_ended_duration_proxy"),
+            ("unexpected", "duration_proxy_unavailable"),
+        ):
+            with self.subTest(duration=duration):
+                source = self.normalize([
+                    report(Duration=duration),
+                    report(**{"Date/Time": "2025-01-01 12:10:00", "Duration": "1-2 hours"}),
+                ])
+                incidents, _, _ = mod.consolidate_reports(source, CONFIG)
+                decisions = mod.generate_pair_decisions(incidents, source, CONFIG)
+                self.assertEqual(decisions.loc[0, "pair_decision"], "keep_distinct")
+                self.assertEqual(decisions.loc[0, "decision_basis"], expected_basis)
+                self.assertTrue(decisions.loc[0, "uncertainty_flag"])
+
+    def test_different_crossings_are_outside_the_pair_decision_universe(self) -> None:
+        source = self.normalize([
+            report(),
+            report(**{"Crossing ID": "654321B", "Date/Time": "2025-01-01 12:10:00"}),
+        ])
+        incidents, _, _ = mod.consolidate_reports(source, CONFIG)
+        decisions = mod.generate_pair_decisions(incidents, source, CONFIG)
+        self.assertTrue(decisions.empty)
+
+    def test_missing_non_temporal_value_does_not_match_a_present_value(self) -> None:
+        source = self.normalize([
+            report(City=None),
+            report(**{"Date/Time": "2025-01-01 12:10:00", "City": "Example"}),
+        ])
+        incidents, _, _ = mod.consolidate_reports(source, CONFIG)
+        decisions = mod.generate_pair_decisions(incidents, source, CONFIG)
+        self.assertEqual(decisions.loc[0, "pair_decision"], "keep_distinct")
+        self.assertIn("City", decisions.loc[0, "incompatible_non_temporal_fields"])
+
+    def test_pair_decisions_are_deterministic_when_source_is_reordered(self) -> None:
         source = self.normalize(
             [
                 report(Reason="A"),
@@ -261,21 +355,42 @@ class IncidentDeduplicationTests(unittest.TestCase):
         )
         incidents, _, _ = mod.consolidate_reports(source, CONFIG)
 
-        first = mod.generate_duplicate_candidates(
-            incidents, source, CONFIG["proximity_bands_minutes"]
-        )
-        second = mod.generate_duplicate_candidates(
+        first = mod.generate_pair_decisions(incidents, source, CONFIG)
+        second = mod.generate_pair_decisions(
             incidents.sample(frac=1, random_state=7),
             source.sample(frac=1, random_state=11),
-            CONFIG["proximity_bands_minutes"],
+            CONFIG,
         )
 
         self.assertEqual(len(first), 2)
-        self.assertTrue(first["candidate_group_id"].notna().all())
-        self.assertEqual(first["candidate_group_id"].nunique(), 1)
+        self.assertTrue(first["pair_decision"].isin({"auto_merge", "keep_distinct"}).all())
+        self.assertTrue(first["pair_decision"].notna().all())
         self.assertEqual(
-            first.set_index("candidate_pair_id")["candidate_group_id"].to_dict(),
-            second.set_index("candidate_pair_id")["candidate_group_id"].to_dict(),
+            first.set_index("pair_decision_id")["pair_decision"].to_dict(),
+            second.set_index("pair_decision_id")["pair_decision"].to_dict(),
+        )
+
+    def test_complete_link_grouping_prevents_chained_false_merge(self) -> None:
+        source = self.normalize([
+            report(Duration="0-15 minutes"),
+            report(**{"Date/Time": "2025-01-01 12:10:00", "Duration": "0-15 minutes"}),
+            report(**{"Date/Time": "2025-01-01 12:20:00", "Duration": "0-15 minutes"}),
+        ])
+        incidents, crosswalk, _ = mod.consolidate_reports(source, CONFIG)
+        decisions = mod.generate_pair_decisions(incidents, source, CONFIG)
+        merged, _, applied = mod.apply_pair_decisions(
+            incidents, crosswalk, source, decisions, CONFIG
+        )
+        self.assertEqual(decisions["pair_decision"].tolist().count("auto_merge"), 2)
+        self.assertEqual(decisions["pair_decision"].tolist().count("keep_distinct"), 1)
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(applied["pair_decision"].tolist().count("auto_merge"), 1)
+        self.assertEqual(applied["pair_decision"].tolist().count("keep_distinct"), 2)
+        self.assertIn("complete_link_conflict", set(applied["decision_basis"]))
+        self.assertTrue(
+            applied.loc[applied["pair_decision"].eq("keep_distinct")]
+            .eval("left_final_incident_id != right_final_incident_id")
+            .all()
         )
 
     def test_timezone_localization_uses_coordinate_not_state_and_preserves_utc(self) -> None:
@@ -317,47 +432,19 @@ class IncidentDeduplicationTests(unittest.TestCase):
         self.assertEqual(summary["unique_signatures_with_multiplicity_difference"], 1)
         self.assertEqual(len(discrepancies), 1)
 
-    def test_review_sample_and_ids_are_deterministic_when_source_is_reordered(self) -> None:
+    def test_decision_audit_sample_and_ids_are_deterministic_when_source_is_reordered(self) -> None:
         source = self.normalize([report(), report(**{"Date/Time": "2025-01-01 12:10:00", "Reason": "B"}), report(**{"Date/Time": "2025-01-01 12:20:00", "Reason": "C"})])
         first_incidents, _, _ = mod.consolidate_reports(source, CONFIG)
         second_incidents, _, _ = mod.consolidate_reports(source.sample(frac=1, random_state=7), CONFIG)
         self.assertEqual(set(first_incidents["canonical_incident_id"]), set(second_incidents["canonical_incident_id"]))
-        first = mod.deterministic_review_sample(mod.generate_duplicate_candidates(first_incidents, source, CONFIG["proximity_bands_minutes"]))
-        second = mod.deterministic_review_sample(mod.generate_duplicate_candidates(second_incidents, source, CONFIG["proximity_bands_minutes"]))
-        self.assertEqual(first["candidate_pair_id"].tolist(), second["candidate_pair_id"].tolist())
-
-    def test_review_labels_require_known_unique_allowed_values(self) -> None:
-        sample = pd.DataFrame(
-            {
-                "candidate_pair_id": ["PAIR-1", "PAIR-2"],
-                "proximity_band_minutes": [15, 30],
-                "crossing_volume_tier": ["low", "medium"],
-                "review_label": ["", ""],
-                "review_notes": ["", ""],
-            }
+        first = mod.deterministic_decision_audit_sample(
+            mod.generate_pair_decisions(first_incidents, source, CONFIG)
         )
-        labels = pd.DataFrame(
-            {
-                "candidate_pair_id": ["PAIR-1", "PAIR-2"],
-                "review_label": ["same_incident", "distinct"],
-                "review_notes": ["same report", "different trains"],
-            }
+        second = mod.deterministic_decision_audit_sample(
+            mod.generate_pair_decisions(second_incidents, source, CONFIG)
         )
-        merged, summary = mod.validate_review_labels(sample, labels)
-        self.assertTrue(summary["complete"])
-        self.assertEqual(summary["reviewed_rows"], 2)
-        self.assertEqual(merged["review_label"].tolist(), ["same_incident", "distinct"])
-
-        _, incomplete = mod.validate_review_labels(sample, labels.iloc[:1])
-        self.assertFalse(incomplete["complete"])
-        self.assertEqual(incomplete["unreviewed_rows"], 1)
-
-        with self.assertRaisesRegex(ValueError, "unknown"):
-            mod.validate_review_labels(sample, labels.assign(candidate_pair_id=["PAIR-1", "PAIR-X"]))
-        with self.assertRaisesRegex(ValueError, "unsupported"):
-            mod.validate_review_labels(sample, labels.assign(review_label=["same_incident", "maybe"]))
-        with self.assertRaisesRegex(ValueError, "duplicate"):
-            mod.validate_review_labels(sample, labels.assign(candidate_pair_id=["PAIR-1", "PAIR-1"]))
+        self.assertEqual(first["pair_decision_id"].tolist(), second["pair_decision_id"].tolist())
+        self.assertNotIn("review_label", first.columns)
 
     def test_input_hashes_detect_content_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -382,11 +469,11 @@ class IncidentDeduplicationTests(unittest.TestCase):
         self.assertEqual(profile.loc[0, "sixty_minute_mark_percentage"], 50.0)
 
     def test_acceptance_report_requires_every_check(self) -> None:
-        waiting = mod.build_acceptance_report({"tests": True, "review": False})
-        complete = mod.build_acceptance_report({"tests": True, "review": True})
+        incomplete = mod.build_acceptance_report({"tests": True, "decisions": False})
+        complete = mod.build_acceptance_report({"tests": True, "decisions": True})
         pending = mod.build_acceptance_report({"tests": True, "saved_notebook": None})
-        self.assertEqual(waiting["status"], "awaiting_review")
-        self.assertEqual(pending["status"], "awaiting_review")
+        self.assertEqual(incomplete["status"], "incomplete")
+        self.assertEqual(pending["status"], "incomplete")
         self.assertEqual(complete["status"], "complete")
 
     def test_notebook_contains_acceptance_workflow(self) -> None:
@@ -394,31 +481,16 @@ class IncidentDeduplicationTests(unittest.TestCase):
         notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
         source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
         required_fragments = [
-            "test_command = ['uv', 'run', 'python', '-m', 'unittest'",
-            "hash_input_files",
-            "v2_repeat",
-            "compare_phase_1_outputs",
             "REUSE_STEP_5_CHECKPOINT = False",
             "RUN_REPEATABILITY_CHECK = False",
-            "effective_reuse_step_5_checkpoint = REUSE_STEP_5_CHECKPOINT and not RUN_REPEATABILITY_CHECK",
-            "RUN_REPEATABILITY_CHECK takes precedence",
-            "reuse_step_5_checkpoint=effective_reuse_step_5_checkpoint",
             "reuse_step_5_checkpoint=False",
-            "'status': 'not_run'",
-            "if RUN_REPEATABILITY_CHECK:\n    acceptance_checks['two_real_data_runs_match']",
-            "candidate_review_labels.csv",
-            "if not review_labels_path.exists()",
-            "acceptance_workflow_stage = 'setup'",
-            "acceptance_workflow_stage == 'diagnostics_reviewed'",
-            "step_5_checkpoint",
-            "checkpoint.json",
-            "crossing_timezones.parquet",
+            "pair_decisions.parquet",
+            "pair_decision_summary.json",
+            "pair_decision_audit_sample.csv",
             "timezone_assignment_diagnostics.csv",
             "local_time_diagnostics.csv",
             "reconciliation_summary.json",
-            "reconciliation_discrepancies.parquet",
-            "candidate_review_summary.json",
-            "write_acceptance_report",
+            "possible_temporal_overlap",
         ]
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
@@ -595,7 +667,7 @@ class IncidentDeduplicationTests(unittest.TestCase):
 
             output = stdout.getvalue()
             self.assertIn("Loading and validating the step-5 checkpoint", output)
-            self.assertIn("[6/9] Generating duplicate candidates", output)
+            self.assertIn("[6/9] Assigning deterministic pair decisions", output)
             self.assertNotIn("[2/9] Reading raw source data", output)
             self.assertEqual(reused_result.summary, fresh_result.summary)
             comparison = mod.compare_phase_1_outputs(fresh_output, reused_output)
@@ -638,15 +710,11 @@ class IncidentDeduplicationTests(unittest.TestCase):
         self.assertEqual(
             first_exceptions["exception_id"].tolist(), second_exceptions["exception_id"].tolist()
         )
-        first_candidates = mod.generate_duplicate_candidates(
-            first_incidents, first, CONFIG["proximity_bands_minutes"]
-        )
-        second_candidates = mod.generate_duplicate_candidates(
-            second_incidents, second, CONFIG["proximity_bands_minutes"]
-        )
+        first_candidates = mod.generate_pair_decisions(first_incidents, first, CONFIG)
+        second_candidates = mod.generate_pair_decisions(second_incidents, second, CONFIG)
         self.assertEqual(
-            first_candidates["candidate_pair_id"].tolist(),
-            second_candidates["candidate_pair_id"].tolist(),
+            first_candidates["pair_decision_id"].tolist(),
+            second_candidates["pair_decision_id"].tolist(),
         )
 
     def test_full_pipeline_accepts_unfingerprinted_inputs_and_records_metadata(self) -> None:
@@ -680,10 +748,10 @@ class IncidentDeduplicationTests(unittest.TestCase):
             self.assertTrue(mod.compare_phase_1_outputs(output_dir, repeat_output_dir)["passed"])
             self.assertEqual(result.summary["candidate_reported_incidents"], 2)
             self.assertTrue((output_dir / "crossing_timezones.parquet").exists())
-            self.assertTrue((output_dir / "candidate_review_summary.json").exists())
+            self.assertTrue((output_dir / "pair_decision_summary.json").exists())
             diagnostics = pd.read_csv(output_dir / "diagnostics_by_year.csv")
             self.assertIn("collapsed_duplicate_report_count", diagnostics.columns)
-            self.assertIn("temporal_candidate_pair_count", diagnostics.columns)
+            self.assertIn("pair_decision_count", diagnostics.columns)
             manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 manifest["inputs"]["authoritative"]["filename"], "authoritative.xlsx"

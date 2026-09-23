@@ -8,7 +8,7 @@ implementation decisions belong in phase-specific plans and should be added only
 when their prerequisites are complete.
 
 The active implementation plan is
-[Phase 1 Remediation: Auditable Incident Deduplication](plans/01a-incident-deduplication-remediation.md).
+[Phase 1 Amendment: Deterministic Two-Outcome Pair Decisions](plans/01b-incident-deduplication-two-outcome-policy.md).
 
 ## Objective
 
@@ -196,14 +196,14 @@ of a phase updates this roadmap before the next plan is finalized.
 
 ### After Phase 1
 
-- Consolidate reports automatically only when all 11 material fields match
-  exactly or after documented, meaning-preserving normalization. Temporal
-  proximity remains review-only evidence and does not change canonical incident
-  assignments.
+- Assign every configured pair `auto_merge` or `keep_distinct`. A duration proxy
+  that could cover the separation is uncertainty evidence, not identity proof;
+  temporal auto-merge also requires all configured non-temporal fields.
 - Confirm the meaning and precision of `Date/Time`.
 - Quantify distinct incidents per crossing and per evaluation period.
 - Determine whether duration fields can support interval-overlap labels.
-- Decide whether probable duplicate groups require manual adjudication.
+- Quantify deterministic pair decisions and their separately recorded
+  uncertainty; human assessments do not establish truth or alter assignments.
 
 ### After Phase 2
 
@@ -271,7 +271,7 @@ reported-event claim boundary.
 
 | Phase | Status | Plan |
 |---|---|---|
-| 1. Source audit and incident deduplication | Remediation implemented — awaiting manual review and repeat-run acceptance evidence | [Phase 1 remediation plan](plans/01a-incident-deduplication-remediation.md) |
+| 1. Source audit and incident deduplication | Two-outcome policy implemented — validation and fresh-run evidence required | [Phase 1 two-outcome amendment](plans/01b-incident-deduplication-two-outcome-policy.md) |
 | 2. Reported-event interval, exposure, and geography construction | Not started — draft blocked by Phase 1 remediation | [Preliminary Phase 2 plan](plans/02-reported-event-interval-exposure-geography.md) |
 | 3. Configurable hotspot cohort and regional screening | Not started | To be drafted after Phase 2 |
 | 4. Pooled timing and geographic baselines | Not started | To be drafted after Phase 3 |

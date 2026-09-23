@@ -1,5 +1,5 @@
 {
-  "ruleset_version": "phase1-v2",
+  "ruleset_version": "phase1-v3",
   "authoritative_sheet": "Sheet1",
   "material_columns": [
     "Crossing ID",
@@ -17,13 +17,24 @@
   "crossing_id_pattern": "^\\d{6}[A-Z]$",
   "auto_merge_tiers": [
     "exact",
-    "normalized_exact"
+    "normalized_exact",
+    "overlap_proxy_non_temporal_match"
   ],
-  "proximity_bands_minutes": [
+  "pair_decision_bands_minutes": [
     15,
     30,
     60,
     120
+  ],
+  "non_temporal_compatibility_fields": [
+    "City",
+    "State",
+    "Street",
+    "County",
+    "Railroad",
+    "Reason",
+    "Immediate Impacts",
+    "Additional Comments"
   ],
   "duration_categories": {
     "0-15 minutes": [

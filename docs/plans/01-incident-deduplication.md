@@ -2,10 +2,12 @@
 
 ## Status
 
-Initial implementation reviewed; remediation required. The active plan is
-[Phase 1 Remediation: Auditable Incident Deduplication](01a-incident-deduplication-remediation.md).
-This original document remains the Phase 1 requirements baseline and does not
-authorize later modeling phases or changes to raw data.
+Historical requirements baseline. The active policy is
+[Phase 1 Amendment: Deterministic Two-Outcome Pair Decisions](01b-incident-deduplication-two-outcome-policy.md),
+which supersedes unresolved/manual-review semantics in this document and the
+[Phase 1 remediation plan](01a-incident-deduplication-remediation.md). This
+original document remains an audit record and does not authorize later modeling
+phases or changes to raw data.
 
 Parent roadmap: [Blocked-Crossing Modeling Roadmap](../modeling-roadmap.md)
 

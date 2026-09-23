@@ -2,8 +2,11 @@
 
 ## Status
 
-Active. This plan remediates the initial Phase 1 notebook implementation before
-Phase 2 is designed or implemented.
+Superseded in part by
+[Phase 1 Amendment: Deterministic Two-Outcome Pair Decisions](01b-incident-deduplication-two-outcome-policy.md).
+This document records the `phase1-v2` remediation. Its review-only temporal
+candidate workflow, manual-label prerequisite, and `awaiting_review` status no
+longer govern `phase1-v3`.
 
 Parent roadmap: [Blocked-Crossing Modeling Roadmap](../modeling-roadmap.md)
 
