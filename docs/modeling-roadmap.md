@@ -271,8 +271,8 @@ reported-event claim boundary.
 
 | Phase | Status | Plan |
 |---|---|---|
-| 1. Source audit and incident deduplication | Two-outcome policy implemented — validation and fresh-run evidence required | [Phase 1 two-outcome amendment](plans/01b-incident-deduplication-two-outcome-policy.md) |
-| 2. Reported-event interval, exposure, and geography construction | Not started — draft blocked by Phase 1 remediation | [Preliminary Phase 2 plan](plans/02-reported-event-interval-exposure-geography.md) |
+| 1. Source audit and incident deduplication | Complete — Phase 1 v3 gate and fresh notebook run accepted | [Phase 1 two-outcome amendment](plans/01b-incident-deduplication-two-outcome-policy.md) |
+| 2. Reported-event interval, exposure, and geography construction | Active foundation implementation — exposure labels blocked pending coverage and approved geography provenance | [Phase 2 plan](plans/02-reported-event-interval-exposure-geography.md) |
 | 3. Configurable hotspot cohort and regional screening | Not started | To be drafted after Phase 2 |
 | 4. Pooled timing and geographic baselines | Not started | To be drafted after Phase 3 |
 | 5. Backtesting, calibration, transfer, and threshold selection | Not started | To be drafted after Phase 4 |

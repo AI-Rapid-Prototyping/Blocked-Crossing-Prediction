@@ -483,6 +483,11 @@ class IncidentDeduplicationTests(unittest.TestCase):
         required_fragments = [
             "REUSE_STEP_5_CHECKPOINT = False",
             "RUN_REPEATABILITY_CHECK = False",
+            "sys.modules.pop(\"incident_deduplication\", None)",
+            "expected_module_path",
+            "loaded_module_path",
+            "generate_pair_decisions",
+            "pair_decision_bands_minutes",
             "reuse_step_5_checkpoint=False",
             "pair_decisions.parquet",
             "pair_decision_summary.json",

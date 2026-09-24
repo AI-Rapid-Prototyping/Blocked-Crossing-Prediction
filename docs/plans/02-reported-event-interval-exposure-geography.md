@@ -2,16 +2,14 @@
 
 ## Status
 
-**Draft for team discussion — blocked by Phase 1 remediation.**
+**Active foundation implementation — exposure labeling remains blocked by
+source-coverage and geography-provenance inputs.**
 
-This is the canonical preliminary Phase 2 plan, but it is not active and does
-not authorize implementation. The active implementation plan remains
-[Phase 1 Amendment: Deterministic Two-Outcome Pair Decisions](01b-incident-deduplication-two-outcome-policy.md).
-
-Phase 2 may become active only after Phase 1 remediation passes, every blocking
-placeholder in this document is resolved, the team reviews the completed plan,
-and the [modeling roadmap](../modeling-roadmap.md) is updated to make Phase 2
-active.
+This is the active Phase 2 plan. Phase 1 v3 is the accepted handoff. Contract,
+validation, inventory, and geography scaffolding may proceed, but production
+exposure labels must not be generated until the applicable stage gates below
+pass. The [modeling roadmap](../modeling-roadmap.md) must be updated before Phase
+2 is marked complete.
 
 ## Plain-Language Briefing
 
@@ -66,9 +64,9 @@ Duration-overlap results are sensitivity outputs, not additional independent
 reported incidents. Deterministic pair decisions, their uncertainty fields, and
 documented exceptions must remain visible in uncertainty diagnostics.
 
-## Activation Prerequisites
+## Staged Prerequisites
 
-Before this plan can be finalized or activated:
+Before any Phase 2 processing:
 
 1. Every acceptance criterion in the Phase 1 two-outcome amendment must pass.
 2. Every configured pair must have a deterministic decision and summarized
@@ -77,7 +75,11 @@ Before this plan can be finalized or activated:
    interval-resolution and uncertainty analyses.
 4. The accepted Phase 1 ruleset, run manifest, artifact schemas and row counts,
    and remaining keep-distinct or exception counts must be recorded in this plan.
-5. Every blocking placeholder below must be resolved without guessing.
+5. The configured geography source must exist and carry complete provenance.
+
+Before interval labels are materialized, BP-02 must provide demonstrated source
+coverage. BP-04 through BP-07 are decisions produced by Phase 2 analyses and are
+completion gates rather than activation prerequisites.
 
 ### Required Phase 1 inputs
 
@@ -102,35 +104,57 @@ ruleset version, Phase 1 gate status, and crosswalk integrity before constructin
 any interval or exposure output. A missing, mismatched, or non-passing dependency
 must stop the run with a clear message.
 
-The current Form 71 candidate input is
+The Phase 1 v3 field contract is:
+
+- `reported_incidents.norm_crossing_id` identifies the crossing.
+- `reported_incidents.earliest_reported_at_utc` supplies the accepted point
+  timestamp.
+- `reported_incidents.primary_source_row_id` joins to
+  `source_reports_with_ids.source_row_id` for duration-proxy evidence.
+- `pair_decisions.left_final_incident_id` and
+  `pair_decisions.right_final_incident_id` connect pair uncertainty to final
+  incidents.
+- `documented_exceptions` remains a separate uncertainty source.
+
+Legacy fields including `crossing_id`, `first_report_time`, `est_end_time`,
+`rule_tier`, and Tier 4 status are not part of the accepted handoff.
+
+The current Form 71 input is
 `data/Crossing_Inventory_Data_(Form_71)_-_Current_20260707.csv`. Its exact
 filename, source version, revision-field treatment, schema, row count, and role in
 geographic assignment must be recorded before use. A later reviewed inventory
 version may replace it through configuration; it must not be silently substituted.
 
-Note: once the MPO dataset is known, name it here as a required Phase 2 geographic input with description of owner, path/URL or retrieval process.
+The candidate MPO boundary input is
+`data/NTAD_Metropolitan_Planning_Organizations.geojson`. It must remain
+`provisional` until its provider version, retrieval date, license, CRS, and
+content hash are recorded in configuration. The empty
+`data/Metropolitan_Planning_Organizations.geojson` fallback is not an
+authoritative source.
 
 ## Blocking Placeholders
 
-These entries record Phase 2 decisions (per docs/modeling-roadmap.md "## Phase Decision Gates" section) that require Phase 1 results or additional source
-research. They are deliberately unresolved in this preliminary plan.
+These entries record Phase 2 prerequisites and completion decisions (per
+docs/modeling-roadmap.md "## Phase Decision Gates" section). Pre-execution and
+label-generation blockers stop only the stages that depend on them; completion
+gates are resolved from Phase 2 evidence.
 
 | ID | Blocking decision | Required evidence | Current status |
 |---|---|---|---|
-| BP-01 | Accepted Phase 1 run and ruleset | Passing gate report, manifest, artifact schemas and row counts, crosswalk integrity, and pair-decision summary | **Unresolved — Phase 1 validation pending** |
+| BP-01 | Accepted Phase 1 run and ruleset | Phase 1 v3 gate, manifest, schemas, crosswalk, and pair-decision summary | **Resolved — 125,673 incidents, 57,282 pair decisions, 4 exceptions; all Phase 1 validations pass** |
 | BP-02 | Demonstrated source-coverage periods | Source-system evidence and Phase 1 date diagnostics sufficient to distinguish covered from unknown periods | **Unresolved — do not generate `no_report_observed` labels** |
-| BP-03 | Timestamp semantics and local-time presentation policy | Phase 1 timestamp profile and source documentation; any required geographic time-zone mapping and daylight-saving-time presentation policy | **Partially resolved — source timestamps are UTC, based on an electronic communication from the FRA data owner dated September 1, 2026; do not assume exact event start** |
-| BP-04 | Selected prediction interval | One-, two-, and four-hour comparison using accepted incidents, coverage, uncertainty, and table-size diagnostics | **Unresolved — hourly is not pre-approved** |
-| BP-05 | Adjacent-interval uncertainty treatment | Point-label, duration-overlap, timestamp-boundary, pair-decision, and exception sensitivity results | **Unresolved — preserve separate outputs** |
-| BP-06 | Full exposure or weighted training sample | Filtered exposure size, sparsity, inclusion probabilities, computational profile, and fidelity checks | **Unresolved — future evaluation remains unsampled** |
-| BP-07 | Keep-distinct and exception effect | Accepted pair-decision results and comparison of canonical versus uncertainty-sensitive counts | **Unresolved — retain decisions and uncertainty evidence** |
+| BP-03 | Timestamp semantics and local-time presentation policy | Accepted Phase 1 timestamp contract | **Resolved — assign intervals in UTC using `earliest_reported_at_utc`; coordinate/IANA local time is presentation-only and is not physical-start evidence** |
+| BP-04 | Selected prediction interval | One-, two-, and four-hour comparison using accepted incidents, coverage, uncertainty, and table-size diagnostics | **Phase 2 completion gate — hourly is not pre-approved** |
+| BP-05 | Adjacent-interval uncertainty treatment | Point-label, duration-overlap, timestamp-boundary, pair-decision, and exception sensitivity results | **Policy resolved; impact analysis pending — preserve separate outputs** |
+| BP-06 | Full exposure or weighted training sample | Filtered exposure size, sparsity, inclusion probabilities, computational profile, and fidelity checks | **Phase 2 completion gate — future evaluation remains unsampled** |
+| BP-07 | Keep-distinct and exception effect | Accepted pair-decision results and comparison of canonical versus uncertainty-sensitive counts | **Policy resolved; impact analysis pending — retain decisions and uncertainty evidence** |
 | BP-08 | H-GAC boundary or membership source | Authoritative provider, exact version or effective date, usage terms, assignment method, and coverage QA | **Unresolved — H-GAC is a candidate only** |
 
-## Proposed Implementation Structure
+## Implementation Structure
 
-Once this plan is activated, use the existing repository pattern of an importable
-module, versioned configuration, thin analyst-facing notebook, synthetic unit
-tests, and ignored reproducible outputs:
+Use the repository pattern of an importable module, versioned configuration,
+thin analyst-facing notebook, synthetic unit tests, and ignored reproducible
+outputs:
 
 - `analysis/reported_event_exposure.py` — deterministic processing functions and
   command-line entry point.
@@ -141,7 +165,7 @@ tests, and ignored reproducible outputs:
 - `unit_tests/test_reported_event_exposure.py` — synthetic tests for time,
   geography, labels, filtering, sampling, and reproducibility.
 
-The proposed command-line shape is:
+The command-line shape is:
 
 ```powershell
 python analysis/reported_event_exposure.py `
@@ -153,6 +177,11 @@ python analysis/reported_event_exposure.py `
 The module and command line must use the same code path. The notebook must derive
 all counts, tables, conclusions, and gate statements from the returned results or
 generated artifacts rather than hard-coded Markdown.
+
+The checked-in configuration is fail-closed. If approved coverage, cohort,
+requested regions, selected interval unit, or geographic provenance is absent,
+the pipeline writes an `incomplete` gate report and manifest but no exposure
+table.
 
 ## Data Contracts
 
@@ -183,11 +212,10 @@ the workbook. An interval outside demonstrated coverage is `unknown`, not
 `no_report_observed`.
 
 The UTC interpretation is based on an electronic communication from the FRA data
-owner dated September 1, 2026. BP-03 remains open only for timestamp semantics
-and any local-time or daylight-saving-time presentation policy. If the activated
-plan converts UTC timestamps for presentation or local operational use, it must
-define a deterministic, documented conversion policy and handle nonexistent or
-ambiguous local times explicitly.
+owner dated September 1, 2026. BP-03 is resolved by using
+`earliest_reported_at_utc` for half-open interval assignment. Coordinate-derived
+IANA local time remains presentation-only and must reuse the Phase 1 conversion
+policy; it cannot alter interval membership or imply exact physical start time.
 
 ### Region definitions
 
@@ -402,10 +430,18 @@ Expected outputs are:
 12. `phase_2_gate_report.json`
 13. `run_manifest.json`
 
+If weighted sampling is selected, also write
+`training_exposure_sample.parquet`; it is not a replacement for the canonical
+unsampled exposure table.
+
 Only the selected requested-region and historical-cohort exposure may be written
 as the primary `interval_exposure.parquet`. Candidate-unit comparisons should use
 on-demand generation or scoped temporary data rather than save national crossing-
 hour tables.
+
+Artifacts already present under `analysis_outputs/phase2/` are a legacy snapshot
+built from the pre-v3 incident schema. Retain them for audit purposes, but do not
+consume, overwrite, or cite them as Phase 2 evidence.
 
 ## Automated Tests
 
@@ -459,7 +495,8 @@ marked complete.
 
 Phase 2 implementation may be marked complete only when:
 
-- Phase 1 prerequisites and every blocking placeholder have been resolved.
+- Phase 1 and pre-execution prerequisites pass, and every Phase 2 completion
+  gate has been resolved.
 - All automated and authorized real-data validation checks pass.
 - Every reported incident remains traceable to Phase 1 and every assigned
   interval remains traceable to its incidents and coverage definition.

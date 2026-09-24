@@ -1,0 +1,51 @@
+{
+  "pipeline_version": "phase2-v1",
+  "expected_phase1_ruleset": "phase1-v3",
+  "form71_inventory_path": "data/Crossing_Inventory_Data_(Form_71)_-_Current_20260707.csv",
+  "source_coverage_path": null,
+  "cohort_path": null,
+  "requested_region_ids": [],
+  "eligibility_as_of": null,
+  "analysis_window": {
+    "start": "2020-01-01T00:00:00Z",
+    "end": "2026-01-01T00:00:00Z"
+  },
+  "candidate_interval_units_hours": [
+    1,
+    2,
+    4
+  ],
+  "selected_interval_unit_hours": null,
+  "max_materialized_rows": 5000000,
+  "crossing_id_pattern": "^\\d{6}[A-Z]$",
+  "inventory_columns": {
+    "crossing_id": "Crossing ID",
+    "closed": "Crossing Closed",
+    "revision_date": "Revision Date",
+    "latitude": "Latitude",
+    "longitude": "Longitude",
+    "state_code": "State Code",
+    "state_name": "State Name",
+    "county_code": "County Code",
+    "county_name": "County Name",
+    "railroad_code": "Railroad Code",
+    "railroad_name": "Railroad Name"
+  },
+  "region_source": {
+    "region_type": "mpo",
+    "path": "data/NTAD_Metropolitan_Planning_Organizations.geojson",
+    "id_field": "MPO_ID",
+    "name_field": "MPO_NAME",
+    "source_name": "US DOT Bureau of Transportation Statistics NTAD MPO boundaries",
+    "source_version": null,
+    "effective_date": null,
+    "license": null,
+    "approval_status": "provisional"
+  },
+  "sampling": {
+    "selected_strategy": null,
+    "negative_fraction": 0.1,
+    "seed": 20260923,
+    "weighted_summary_absolute_tolerance": 1.0
+  }
+}
